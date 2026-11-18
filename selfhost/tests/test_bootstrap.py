@@ -44,5 +44,15 @@ class BootstrapTests(unittest.TestCase):
  def test_stock_auto_updater_is_not_started(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d)/'new';self.init(p);v=json.loads((p/'docker-compose.reachability.yml').read_text());self.assertIn('upstream-updater-disabled',v['services']['kortix-updater']['profiles'])
+ def test_docker_workers_enable_cross_provider_drive_sync(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d)/'new';r=self.init(p);self.assertEqual(r.returncode,0,r.stderr)
+   self.assertEqual(env(p/'.env').get('KORTIX_DRIVES_SYNC'),'on')
+ def test_reinit_preserves_explicit_drive_sync_opt_out(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d)/'new';self.init(p)
+   with (p/'.env').open('a') as f:f.write('KORTIX_DRIVES_SYNC=off\n')
+   r=self.invoke('init','--instance-dir',str(p));self.assertEqual(r.returncode,0,r.stderr)
+   self.assertEqual(env(p/'.env')['KORTIX_DRIVES_SYNC'],'off')
 
 if __name__=='__main__':unittest.main()
