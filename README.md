@@ -113,6 +113,7 @@ Provider tests run in a container without external network access. CI never rece
 - [SSH VPS operations](.agents/skills/self-host-docker-cloud/references/ssh-vps.md)
 - [Backup and restore](.agents/skills/self-host-docker-cloud/references/backup-restore.md)
 - [Troubleshooting](.agents/skills/self-host-docker-cloud/references/troubleshooting.md)
+- [Spawned workers and drive sync](.agents/skills/self-host-docker-cloud/references/spawned-worker-drives.md)
 - [Compatibility](.agents/skills/self-host-docker-cloud/references/compatibility.md)
 - [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changes](CHANGELOG.md)
 

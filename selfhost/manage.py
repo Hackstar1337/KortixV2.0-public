@@ -304,6 +304,10 @@ def generated_env(instance: Path, config: dict[str, Any], existing: dict[str, st
         values.setdefault(key, supabase_jwt(role,jwt_secret))
     values.setdefault("DEFAULT_CPU_CORES", "2")
     values.setdefault("DEFAULT_MEMORY_GB", "4")
+    # Docker workers synchronize authorized drives through Kortix rather than
+    # mounting Platinum volumes. Preserve an operator's explicit opt-out.
+    if "docker-cloud" in config["providers"]:
+        values.setdefault("KORTIX_DRIVES_SYNC", "on")
     values.setdefault("DOCKER_CLOUD_LIFETIME_MINUTES", "60")
     values.setdefault("DOCKER_CLOUD_RENEW_BEFORE_MINUTES", "20")
     values.setdefault("KORTIX_IMAGE_PULL", "never")

@@ -1,6 +1,13 @@
-﻿# Changelog
+# Changelog
 
 All notable public changes to the Kortix V2.0 Public operator and contributor surface are recorded here. This changelog describes documentation and integration boundaries; it is not a production certification.
+
+## Unreleased — spawned-worker drive compatibility
+
+- Fresh Docker setups now default `KORTIX_DRIVES_SYNC=on`, allowing regular workers to use the existing authenticated cross-provider drive-sync path.
+- Existing explicit settings, including `off`, are preserved. No drive data is migrated or deleted.
+- Added installer regressions for the default and opt-out preservation, plus operator instructions for existing deployments.
+- Docker compute does not replace Platinum-backed shared-drive storage. Storage access and an end-to-end retried worker remain required.
 
 ## [v2.0 public release candidate] — 2026-11-18
 
