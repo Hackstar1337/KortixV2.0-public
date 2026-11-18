@@ -1,0 +1,321 @@
+//! Protocol conformance for the Rust capture engine (Windows and Linux).
+//! Spawns the real binary, speaks JSON lines, and checks ping, permissions,
+//! ocr on a synthetic PNG, convert/crop, the error path, and (Windows) a real
+//! screen capture through Desktop Duplication.
+#![cfg(all(
+    feature = "capture-engine",
+    any(target_os = "windows", target_os = "linux")
+))]
+
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+struct Engine {
+    child: Child,
+    stdin: ChildStdin,
+    out: BufReader<ChildStdout>,
+    next: u64,
+}
+
+impl Engine {
+    fn start() -> Self {
+        Self::start_with(Stdio::inherit())
+    }
+
+    fn start_with(stderr: Stdio) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kortix-capture-engine"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn engine");
+        let stdin = child.stdin.take().unwrap();
+        let out = BufReader::new(child.stdout.take().unwrap());
+        Engine {
+            child,
+            stdin,
+            out,
+            next: 1,
+        }
+    }
+
+    fn call(&mut self, mut req: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        req["id"] = json!(id);
+        writeln!(self.stdin, "{req}").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        self.out.read_line(&mut line).unwrap();
+        let v: Value =
+            serde_json::from_str(&line).unwrap_or_else(|_| panic!("bad response {line:?}"));
+        assert_eq!(v["id"], json!(id), "id must be echoed");
+        v
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// White canvas with big black block letters "KORTIX 42" drawn from a 5x7 font.
+fn synthetic_png(path: &std::path::Path) {
+    const GLYPHS: &[(char, [&str; 7])] = &[
+        (
+            'K',
+            [
+                "10001", "10010", "10100", "11000", "10100", "10010", "10001",
+            ],
+        ),
+        (
+            'O',
+            [
+                "01110", "10001", "10001", "10001", "10001", "10001", "01110",
+            ],
+        ),
+        (
+            'R',
+            [
+                "11110", "10001", "10001", "11110", "10100", "10010", "10001",
+            ],
+        ),
+        (
+            'T',
+            [
+                "11111", "00100", "00100", "00100", "00100", "00100", "00100",
+            ],
+        ),
+        (
+            'I',
+            [
+                "01110", "00100", "00100", "00100", "00100", "00100", "01110",
+            ],
+        ),
+        (
+            'X',
+            [
+                "10001", "10001", "01010", "00100", "01010", "10001", "10001",
+            ],
+        ),
+        (
+            '4',
+            [
+                "00010", "00110", "01010", "10010", "11111", "00010", "00010",
+            ],
+        ),
+        (
+            '2',
+            [
+                "01110", "10001", "00001", "00010", "00100", "01000", "11111",
+            ],
+        ),
+    ];
+    let scale = 12u32;
+    let text = "KORTIX 42";
+    let (w, h) = (700u32, 200u32);
+    let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255]));
+    let mut x0 = 30u32;
+    for ch in text.chars() {
+        if let Some((_, rows)) = GLYPHS.iter().find(|(c, _)| *c == ch) {
+            for (ry, row) in rows.iter().enumerate() {
+                for (rx, bit) in row.chars().enumerate() {
+                    if bit == '1' {
+                        for dy in 0..scale {
+                            for dx in 0..scale {
+                                img.put_pixel(
+                                    x0 + rx as u32 * scale + dx,
+                                    50 + ry as u32 * scale + dy,
+                                    image::Rgb([0, 0, 0]),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        x0 += 6 * scale + 2;
+    }
+    img.save(path).unwrap();
+}
+
+#[test]
+fn ping_permissions_unknown_and_bad_json() {
+    let mut e = Engine::start();
+    let pong = e.call(json!({"cmd": "ping"}));
+    assert_eq!(pong["ok"], json!(true));
+    assert_eq!(pong["pong"], json!(true));
+    assert!(pong["pid"].as_u64().unwrap() > 0);
+
+    let perms = e.call(json!({"cmd": "permissions"}));
+    assert_eq!(perms["ok"], json!(true));
+    assert!(
+        perms["screen"].is_boolean() && perms["accessibility"].is_boolean(),
+        "{perms}"
+    );
+
+    let bad = e.call(json!({"cmd": "nope"}));
+    assert_eq!(bad["ok"], json!(false));
+    assert!(bad["error"].as_str().unwrap().starts_with("unknown_cmd"));
+
+    writeln!(e.stdin, "not json").unwrap();
+    let mut line = String::new();
+    e.out.read_line(&mut line).unwrap();
+    let v: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v, json!({"ok": false, "error": "bad_json"}));
+}
+
+#[test]
+fn convert_crops_and_ocr_reads_synthetic_png() {
+    let dir = std::env::temp_dir().join(format!("kce-proto-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("in.png");
+    synthetic_png(&png);
+    let mut e = Engine::start();
+
+    let out = dir.join("crop.png");
+    let c = e.call(json!({"cmd": "convert", "path": png, "out": out, "crop": {"x": 10, "y": 20, "w": 300, "h": 100}}));
+    assert_eq!(c["ok"], json!(true), "{c}");
+    assert_eq!(
+        (c["width"].as_u64(), c["height"].as_u64()),
+        (Some(300), Some(100))
+    );
+
+    let missing = e.call(json!({"cmd": "ocr", "path": dir.join("absent.png")}));
+    assert_eq!(missing["ok"], json!(false));
+    assert_eq!(missing["error"], json!("image_not_found"));
+
+    let r = e.call(json!({"cmd": "ocr", "path": png, "level": "accurate", "languages": []}));
+    if r["ok"] == json!(false) {
+        // No OCR backend on this host (no tesseract / no Windows OCR pack): the
+        // error must name it. Never a silent success with no boxes.
+        let err = r["error"].as_str().unwrap();
+        assert!(
+            err.contains("ocr_unavailable") || err.starts_with("ocr_failed"),
+            "{r}"
+        );
+        eprintln!("SKIP ocr text assertion: {err}");
+    } else {
+        assert_eq!(
+            (r["width"].as_u64(), r["height"].as_u64()),
+            (Some(700), Some(200))
+        );
+        let text: String = r["boxes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["text"].as_str().unwrap().to_uppercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("KORTIX") || text.contains("42"),
+            "OCR text {text:?}"
+        );
+        let b = &r["boxes"][0];
+        for k in ["x", "y", "w", "h", "text", "confidence"] {
+            assert!(b.get(k).is_some(), "box field {k}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Every display is grabbed by Desktop Duplication, not the GDI fallback: GDI
+/// paints GPU-rendered content (a CAD canvas, a game, video) black. Two ticks:
+/// the first opens the duplication, the second reads it again (a static screen
+/// hands out no new frame). Each frame is a real picture, not one flat color.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_captures_every_display_through_desktop_duplication() {
+    let dir = std::env::temp_dir().join(format!("kce-dup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("engine.stderr");
+    let mut e = Engine::start_with(Stdio::from(std::fs::File::create(&log).unwrap()));
+    for tick in 0..2 {
+        let out = dir.join(format!("tick{tick}.jpg"));
+        let res = e.call(
+            json!({"cmd": "capture", "all_displays": true, "record_unknown": true,
+            "out": out.to_str().unwrap(), "max_width": 0, "max_height": 0}),
+        );
+        assert_eq!(res["ok"], json!(true), "{res}");
+        let displays = res["displays"].as_array().expect("displays");
+        assert!(!displays.is_empty(), "{res}");
+        for d in displays {
+            let path = d["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no frame: {d}"));
+            let img = image::open(path).unwrap().to_luma8();
+            let (lo, hi) = img
+                .pixels()
+                .fold((255u8, 0u8), |(lo, hi), p| (lo.min(p.0[0]), hi.max(p.0[0])));
+            assert!(hi - lo > 32, "tick {tick}: a flat frame ({lo}..{hi}): {d}");
+            assert_eq!(
+                (img.width() as i64, img.height() as i64),
+                (
+                    d["display"]["w"].as_i64().unwrap(),
+                    d["display"]["h"].as_i64().unwrap()
+                ),
+                "the frame is the whole display"
+            );
+        }
+    }
+    drop(e);
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !stderr.contains("desktop duplication unavailable"),
+        "the engine fell back to GDI: {stderr}"
+    );
+}
+
+/// A display whose desktop image did not change since the last read is not
+/// read again: fed back its own content hash, the engine answers `unchanged`
+/// and `reused` without reading the pixels. A runner desktop can change (a
+/// clock), so one of several ticks must reuse.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_skips_reading_a_display_that_did_not_change() {
+    let dir = std::env::temp_dir().join(format!("kce-reuse-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut e = Engine::start();
+    let mut unchanged = json!({});
+    let mut reused = 0;
+    for tick in 0..6 {
+        let out = dir.join(format!("tick{tick}.jpg"));
+        let res = e.call(
+            json!({"cmd": "capture", "all_displays": true, "record_unknown": true,
+            "out": out.to_str().unwrap(), "unchanged": unchanged}),
+        );
+        assert_eq!(res["ok"], json!(true), "{res}");
+        let mut next = json!({});
+        for d in res["displays"].as_array().expect("displays") {
+            if d["reused"] == json!(true) {
+                assert_eq!(d["unchanged"], json!(true), "{d}");
+                reused += 1;
+            }
+            if let Some(h) = d["content_hash"].as_str() {
+                next[d["display"]["id"].to_string()] = json!(h);
+            }
+        }
+        unchanged = next;
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    assert!(reused > 0, "no tick reused an unchanged display");
+}
+
+/// `status.json` `resources` sees a running Kortix Capture process with its
+/// CPU time and memory: the real engine binary, read by the OS process reader.
+#[test]
+fn the_resource_reader_sees_a_running_engine() {
+    let mut e = Engine::start();
+    assert_eq!(e.call(json!({"cmd": "ping"}))["ok"], json!(true));
+    let pid = e.child.id();
+    let procs = kortix_backend::self_usage::processes().expect("a process reader on this OS");
+    let engine = procs
+        .iter()
+        .find(|p| p.pid == pid)
+        .unwrap_or_else(|| panic!("engine pid {pid} not in {procs:?}"));
+    assert_eq!(engine.name, "kortix-capture-engine");
+    assert!(engine.memory_bytes > 1_000_000, "{engine:?}");
+}

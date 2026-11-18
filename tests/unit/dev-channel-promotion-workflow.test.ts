@@ -1,0 +1,36 @@
+import { describe, expect, test } from 'vitest';
+import { readWorkflow } from '../src/fixtures/repo';
+
+const workflow = readWorkflow('deploy-dev.yml');
+
+function jobBody(name: string): string {
+  const start = workflow.indexOf(`  ${name}:`);
+  if (start < 0) throw new Error(`missing workflow job: ${name}`);
+  const next = workflow.slice(start + 2).search(/^  [a-z][a-z0-9-]+:/m);
+  return next < 0 ? workflow.slice(start) : workflow.slice(start, start + 2 + next);
+}
+
+describe('Deploy Dev post-deploy verification', () => {
+  // deploy-gateway-ecs runs after a skipped terraform-dev-api; a plain `if:` here inherits that skip.
+  test('verify-gateway-dev-parity runs after a skipped Terraform apply', () => {
+    const body = jobBody('verify-gateway-dev-parity');
+    expect(body).toContain('if: ${{ always()');
+    expect(body).toContain("needs.deploy-gateway-ecs.result == 'success'");
+  });
+});
+
+describe('Deploy Dev self-host channel promotions', () => {
+  for (const [job, prerequisites] of [
+    ['promote-dev-channel-api', ['build-api', 'deploy-api-ecs']],
+    ['promote-dev-channel-gateway', ['build-gateway', 'verify-gateway-dev-parity']],
+    ['promote-dev-channel-frontend', ['build-frontend', 'verify-web-dev']],
+  ] as const) {
+    test(`${job} runs after unrelated surface jobs skip`, () => {
+      const body = jobBody(job);
+      expect(body).toContain('if: ${{ always()');
+      for (const prerequisite of prerequisites) {
+        expect(body).toContain(`needs.${prerequisite}.result == 'success'`);
+      }
+    });
+  }
+});

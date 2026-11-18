@@ -1,0 +1,46 @@
+name: Docker Cloud or self-host issue
+description: Report a reproducible problem in this independent distribution
+title: "[Self-host] "
+body:
+  - type: markdown
+    attributes:
+      value: "Never upload .env files, tokens, signed URLs, customer data or raw private logs. Report security vulnerabilities through a private advisory."
+  - type: input
+    id: revision
+    attributes:
+      label: Repository commit or release
+      placeholder: "Commit SHA or release tag"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system, architecture and Docker/Compose versions
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Failing stage
+      options:
+        - Source build
+        - Instance setup or bootstrap
+        - Runtime image build
+        - Sandbox creation or restart
+        - Model inference
+        - Preview or WebSocket
+        - Persistence or recovery
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction and expected behavior
+      description: Use synthetic projects and redact all private identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized error and checks performed
+      description: Include error codes and stages only. Do not paste credentials or signed request bodies.

@@ -1,0 +1,866 @@
+services:
+  supabase-studio:
+    image: supabase/studio:2026.07.07-sha-a6a04f2@sha256:c93ea0e057db350dbd20c6b58f7be53f79454c916f6226692c07ff2c215c1615
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://localhost:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"
+      timeout: 10s
+      interval: 5s
+      retries: 3
+      start_period: 20s
+    environment:
+      HOSTNAME: 0.0.0.0
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PORT: ${SUPABASE_POSTGRES_INTERNAL_PORT}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER_READ_WRITE: postgres
+      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS}
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+      PGRST_DB_EXTRA_SEARCH_PATH: ${PGRST_DB_EXTRA_SEARCH_PATH:-public}
+      DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
+      DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY}
+      ENABLED_FEATURES_LOGS_ALL: "true"
+      SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
+      EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+      LOGFLARE_URL: http://analytics:4000
+    volumes:
+      - ./volumes/snippets:/app/snippets:z
+      - ./volumes/functions:/app/edge-functions:ro,z
+    depends_on:
+      supabase-analytics:
+        condition: service_healthy
+    networks:
+      default:
+        aliases:
+          - studio
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 128m
+  supabase-kong:
+    image: kong/kong:3.9.1@sha256:6addf50e6bd8d578314cb9ce4f2d2d1e3781d2edecef59f707e00c6e05d384f5
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - api-gw
+          - kong
+    healthcheck:
+      test:
+        - CMD
+        - kong
+        - health
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - 127.0.0.1:${SUPABASE_PORT}:8000
+    volumes:
+      - ./volumes/api/kong.yml:/home/kong/temp.yml:ro,z
+      - ./volumes/api/kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro,z
+    environment:
+      KONG_DATABASE: off
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
+      KONG_ROUTER_FLAVOR: expressions
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_DNS_NOT_FOUND_TTL: 1
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination,ip-restriction,post-function
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      KONG_PROXY_ACCESS_LOG: /dev/stdout combined
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:-}
+      ANON_KEY_ASYMMETRIC: ${ANON_KEY_ASYMMETRIC:-}
+      SERVICE_ROLE_KEY_ASYMMETRIC: ${SERVICE_ROLE_KEY_ASYMMETRIC:-}
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+      KONG_NGINX_WORKER_PROCESSES: "2"
+      KONG_DNS_VALID_TTL: "5"
+    entrypoint:
+      - /bin/sh
+      - /home/kong/kong-entrypoint.sh
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 128m
+  supabase-auth:
+    image: supabase/gotrue:v2.189.0@sha256:385184459f57569c54c25209f51f3b2be99ddd7c4ce9e3555b5d3eea8447b7cf
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --no-verbose
+        - --tries=1
+        - --spider
+        - http://localhost:9999/health
+      timeout: 5s
+      interval: 5s
+      retries: 24
+      start_period: 120s
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${SUPABASE_POSTGRES_INTERNAL_PORT}/${POSTGRES_DB}
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
+      GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED: "true"
+      GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL: "0"
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP}
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS}
+      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT}
+      GOTRUE_SMTP_USER: ${SMTP_USER}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME}
+      GOTRUE_MAILER_URLPATHS_INVITE: ${MAILER_URLPATHS_INVITE}
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAILER_URLPATHS_CONFIRMATION}
+      GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAILER_URLPATHS_RECOVERY}
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAILER_URLPATHS_EMAIL_CHANGE}
+      GOTRUE_EXTERNAL_PHONE_ENABLED: ${ENABLE_PHONE_SIGNUP}
+      GOTRUE_SMS_AUTOCONFIRM: ${ENABLE_PHONE_AUTOCONFIRM}
+      GOTRUE_SAML_ENABLED: ${SAML_ENABLED}
+      GOTRUE_SAML_PRIVATE_KEY: ${SAML_PRIVATE_KEY}
+      GOTRUE_RATE_LIMIT_HEADER: X-Forwarded-For
+      GOTRUE_RATE_LIMIT_EMAIL_SENT: "30"
+      GOTRUE_RATE_LIMIT_SMS_SENT: "30"
+      GOTRUE_RATE_LIMIT_VERIFY: "30"
+      GOTRUE_RATE_LIMIT_TOKEN_REFRESH: "150"
+      GOTRUE_RATE_LIMIT_OTP: "30"
+      GOTRUE_RATE_LIMIT_ANONYMOUS_USERS: "30"
+      GOTRUE_HOOK_SEND_EMAIL_ENABLED: ${GOTRUE_HOOK_SEND_EMAIL_ENABLED}
+      GOTRUE_HOOK_SEND_EMAIL_URI: ${GOTRUE_HOOK_SEND_EMAIL_URI}
+      GOTRUE_HOOK_SEND_EMAIL_SECRETS: ${AUTH_EMAIL_HOOK_SECRET}
+      GOTRUE_HOOK_BEFORE_USER_CREATED_ENABLED: "true"
+      GOTRUE_HOOK_BEFORE_USER_CREATED_URI: pg-functions://postgres/kortix/before_user_created_hook
+    networks:
+      default:
+        aliases:
+          - auth
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 256m
+    mem_reservation: 64m
+  supabase-rest:
+    image: postgrest/postgrest:v14.12@sha256:54000f24847d01a2c2302e0041cf0618b875c57fb48507d743cfa9aaa50bf43c
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - postgrest
+        - --ready
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${SUPABASE_POSTGRES_INTERNAL_PORT}/${POSTGRES_DB}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS}
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+      PGRST_DB_EXTRA_SEARCH_PATH: ${PGRST_DB_EXTRA_SEARCH_PATH:-public}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_ADMIN_SERVER_HOST: localhost
+      PGRST_JWT_SECRET: ${JWT_JWKS:-${JWT_SECRET}}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
+    command:
+      - postgrest
+    networks:
+      default:
+        aliases:
+          - rest
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 256m
+    mem_reservation: 64m
+  supabase-realtime:
+    image: supabase/realtime:v2.102.3@sha256:aa1c92c0cf326007563641730ec9da9c60478caa6853887775365fa2c097a471
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -sSfL --head -o /dev/null -H "Authorization: Bearer ${ANON_KEY}" http://localhost:4000/api/tenants/realtime-dev/health'
+      timeout: 5s
+      interval: 30s
+      retries: 3
+      start_period: 10s
+    environment:
+      PORT: 4000
+      DB_HOST: ${POSTGRES_HOST}
+      DB_PORT: ${SUPABASE_POSTGRES_INTERNAL_PORT}
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY:-supabaserealtime}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"
+    networks:
+      default:
+        aliases:
+          - realtime
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 128m
+  supabase-storage:
+    image: supabase/storage-api:v1.60.4@sha256:c8eb9858eafec891a97c27125470aaad54703c3f4eb4d55ca7f1bf6c6411febf
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+      supabase-rest:
+        condition: service_started
+      supabase-imgproxy:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --no-verbose
+        - --tries=1
+        - --spider
+        - http://storage:5000/status
+      timeout: 5s
+      interval: 5s
+      retries: 24
+      start_period: 120s
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${SUPABASE_POSTGRES_INTERNAL_PORT}/${POSTGRES_DB}
+      STORAGE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      REQUEST_ALLOW_X_FORWARDED_PATH: "true"
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      GLOBAL_S3_BUCKET: ${GLOBAL_S3_BUCKET}
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: ${STORAGE_TENANT_ID}
+      REGION: ${REGION}
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://imgproxy:5001
+      S3_PROTOCOL_ACCESS_KEY_ID: ${S3_PROTOCOL_ACCESS_KEY_ID}
+      S3_PROTOCOL_ACCESS_KEY_SECRET: ${S3_PROTOCOL_ACCESS_KEY_SECRET}
+    volumes:
+      - ./volumes/storage:/var/lib/storage:z
+    networks:
+      default:
+        aliases:
+          - storage
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 128m
+  supabase-imgproxy:
+    image: darthsim/imgproxy:v3.30.1@sha256:3b709e4a0e5e8e0e959b556b7031229202b4b8e7e7d955c517ea7abed68ee34d
+    restart: unless-stopped
+    volumes:
+      - ./volumes/storage:/var/lib/storage:z
+    healthcheck:
+      test:
+        - CMD
+        - imgproxy
+        - health
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      IMGPROXY_BIND: :5001
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_AUTO_WEBP: ${IMGPROXY_AUTO_WEBP}
+      IMGPROXY_MAX_SRC_RESOLUTION: 16.8
+    networks:
+      default:
+        aliases:
+          - imgproxy
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 64m
+  supabase-meta:
+    image: supabase/postgres-meta:v0.96.6@sha256:a84cc713585eea7b401e4a2561ec4a1e48c87083d1c7ecb4502f204bb4391300
+    restart: unless-stopped
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: ${POSTGRES_HOST}
+      PG_META_DB_PORT: ${SUPABASE_POSTGRES_INTERNAL_PORT}
+      PG_META_DB_NAME: ${POSTGRES_DB}
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+    networks:
+      default:
+        aliases:
+          - meta
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 256m
+    mem_reservation: 64m
+  supabase-functions:
+    image: supabase/edge-runtime:v1.74.0@sha256:2781daf92394db91f7e94129cc3d04ec474ad16a8fe64b3fbeef6e7d557ab120
+    restart: unless-stopped
+    volumes:
+      - ./volumes/functions:/home/deno/functions:z
+      - deno-cache:/root/.cache/deno
+    depends_on:
+      supabase-kong:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - timeout 1 bash -c '</dev/tcp/127.0.0.1/9000'
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_PUBLISHABLE_KEYS: '{"default":"${SUPABASE_PUBLISHABLE_KEY:-}"}'
+      SUPABASE_SECRET_KEYS: '{"default":"${SUPABASE_SECRET_KEY:-}"}'
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${SUPABASE_POSTGRES_INTERNAL_PORT}/${POSTGRES_DB}
+      VERIFY_JWT: ${FUNCTIONS_VERIFY_JWT}
+    command:
+      - start
+      - --main-service
+      - /home/deno/functions/main
+    networks:
+      default:
+        aliases:
+          - functions
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 128m
+  supabase-db:
+    image: supabase/postgres:17.6.1.136@sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00
+    restart: unless-stopped
+    volumes:
+      - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+      - ./volumes/db/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:Z
+      - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
+      - ./volumes/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:Z
+      - ./volumes/db/data:/var/lib/postgresql/data:Z
+      - ./volumes/db/_supabase.sql:/docker-entrypoint-initdb.d/migrations/97-_supabase.sql:Z
+      - ./volumes/db/logs.sql:/docker-entrypoint-initdb.d/migrations/99-logs.sql:Z
+      - ./volumes/db/pooler.sql:/docker-entrypoint-initdb.d/migrations/99-pooler.sql:Z
+      - db-config:/etc/postgresql-custom
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - tr '\0' ' ' </proc/1/cmdline | grep -q '/postgres ' && PGPASSWORD="$${POSTGRES_PASSWORD}" psql -h supabase-db -U supabase_auth_admin -d "$${POSTGRES_DB}" -tAc 'select 1' >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: ${SUPABASE_POSTGRES_INTERNAL_PORT}
+      POSTGRES_PORT: ${SUPABASE_POSTGRES_INTERNAL_PORT}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      POSTGRES_DB: ${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: ${JWT_EXPIRY}
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+      - -c
+      - log_min_messages=fatal
+    networks:
+      default:
+        aliases:
+          - db
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 1280m
+    mem_reservation: 512m
+    oom_score_adj: -900
+  supabase-supavisor:
+    image: supabase/supavisor:2.9.5@sha256:31c2f05b13b11069660fdfae2f6cfd37b509748d2710aca121cfee8b16cb8b07
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:${POSTGRES_PORT}:5432
+      - 127.0.0.1:${POOLER_PORT}:6543
+    volumes:
+      - ./volumes/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,z
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -sSfL
+        - --head
+        - -o
+        - /dev/null
+        - http://127.0.0.1:4000/api/health
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      POSTGRES_PORT: ${SUPABASE_POSTGRES_INTERNAL_PORT}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_URL: ecto://supabase_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${SUPABASE_POSTGRES_INTERNAL_PORT}/_supabase
+      CLUSTER_POSTGRES: "true"
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      VAULT_ENC_KEY: ${VAULT_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      REGION: local
+      ERL_AFLAGS: -proto_dist inet_tcp
+      POOLER_TENANT_ID: ${POOLER_TENANT_ID}
+      POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE}
+      POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN}
+      POOLER_POOL_MODE: transaction
+      DB_POOL_SIZE: ${POOLER_DB_POOL_SIZE}
+    command:
+      - /bin/sh
+      - -c
+      - /app/bin/migrate && /app/bin/supavisor eval "$$(cat /etc/pooler/pooler.exs)" && /app/bin/server
+    networks:
+      default:
+        aliases:
+          - supavisor
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 128m
+  supabase-analytics:
+    image: supabase/logflare:1.43.1@sha256:a0c4323d57ada22270d740796cbd2c353cd5c627479dff075c0f0bbb3fa5e5b0
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -sSfL -o /dev/null http://localhost:4000/health
+      timeout: 5s
+      interval: 5s
+      retries: 24
+      start_period: 120s
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      LOGFLARE_NODE_HOST: 127.0.0.1
+      DB_USERNAME: supabase_admin
+      DB_DATABASE: _supabase
+      DB_HOSTNAME: ${POSTGRES_HOST}
+      DB_PORT: ${SUPABASE_POSTGRES_INTERNAL_PORT}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SCHEMA: _analytics
+      LOGFLARE_SINGLE_TENANT: "true"
+      LOGFLARE_SUPABASE_MODE: "true"
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: ${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+      LOGFLARE_FEATURE_FLAG_OVERRIDE: multibackend=true
+      POSTGRES_BACKEND_URL: postgresql://supabase_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${SUPABASE_POSTGRES_INTERNAL_PORT}/_supabase
+      POSTGRES_BACKEND_SCHEMA: _analytics
+    networks:
+      default:
+        aliases:
+          - analytics
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 640m
+    mem_reservation: 256m
+    oom_score_adj: 500
+  supabase-vector:
+    image: timberio/vector:0.53.0-alpine@sha256:ca92d617e905953c3f852e7e88061f7039460e733522e3f0c21bc6ae946b2558
+    restart: unless-stopped
+    volumes:
+      - ./volumes/logs/vector.yml:/etc/vector/vector.yml:ro,z
+      - ${DOCKER_SOCKET_LOCATION}:/var/run/docker.sock:ro,z
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --no-verbose --tries=1 --spider http://vector:9001/health
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    depends_on:
+      supabase-analytics:
+        condition: service_healthy
+    environment:
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: ${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+    command:
+      - --config
+      - /etc/vector/vector.yml
+    security_opt:
+      - label=disable
+    networks:
+      default:
+        aliases:
+          - vector
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 192m
+    mem_reservation: 64m
+    oom_score_adj: 500
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    ports:
+      - 127.0.0.1:${FRONTEND_PORT}:3000
+    environment:
+      KORTIX_API_PROXY_TARGET: http://kortix-api:8008
+      KORTIX_PUBLIC_SUPABASE_URL: ${SUPABASE_PUBLIC_URL}
+      KORTIX_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      KORTIX_PUBLIC_BACKEND_URL: ${API_PUBLIC_URL}/v1
+      KORTIX_PUBLIC_BILLING_ENABLED: ${KORTIX_PUBLIC_BILLING_ENABLED}
+      KORTIX_PUBLIC_CONNECTORS_ENABLED: ${KORTIX_PUBLIC_CONNECTORS_ENABLED}
+      KORTIX_PUBLIC_RESTRICT_ACCOUNT_CREATION: ${KORTIX_PUBLIC_RESTRICT_ACCOUNT_CREATION}
+      KORTIX_PUBLIC_APP_URL: ${PUBLIC_URL}
+      KORTIX_DOMAIN_ALIASES: ${KORTIX_DOMAIN_ALIASES:-}
+      KORTIX_PUBLIC_AUTH_METHODS: ${KORTIX_PUBLIC_AUTH_METHODS}
+      KORTIX_PUBLIC_DISABLE_LANDING_PAGE: ${KORTIX_PUBLIC_DISABLE_LANDING_PAGE}
+      SUPABASE_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_SERVER_URL: http://supabase-kong:8000
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      BACKEND_URL: ${API_PUBLIC_URL}/v1
+      NODE_OPTIONS: --max-http-header-size=131072
+    depends_on:
+      kortix-api:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "node -e \"fetch('http://localhost:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: ${KORTIX_FRONTEND_MEMORY_LIMIT:-512m}
+    mem_reservation: 128m
+  kortix-migrate:
+    image: ${API_IMAGE}
+    user: 0:0
+    command:
+      - bun
+      - /app/packages/db/scripts/migrate.ts
+      - bootstrap
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@supabase-db:5432/postgres
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+      supabase-auth:
+        condition: service_healthy
+    restart: no
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 512m
+    mem_reservation: 128m
+  kortix-api:
+    image: ${API_IMAGE}
+    user: 0:0
+    ports:
+      - 127.0.0.1:${API_PORT}:8008
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    env_file:
+      - .env
+    environment:
+      PORT: "8008"
+      SUPABASE_URL: http://supabase-kong:8000
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@supabase-db:5432/postgres
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      ALLOWED_SANDBOX_PROVIDERS: ${ALLOWED_SANDBOX_PROVIDERS}
+      DAYTONA_API_KEY: ${DAYTONA_API_KEY}
+      DAYTONA_SERVER_URL: ${DAYTONA_SERVER_URL}
+      DAYTONA_TARGET: ${DAYTONA_TARGET}
+      KORTIX_URL: ${KORTIX_URL}
+      FRONTEND_URL: ${PUBLIC_URL}
+      CORS_ALLOWED_ORIGINS: ${PUBLIC_URL},${API_PUBLIC_URL}
+      KORTIX_ROUTER_INTERNAL_ENABLED: "false"
+      KORTIX_CONFIG_ARCHIVE_S3_BUCKET: kortix-config-releases
+      KORTIX_CONFIG_ARCHIVE_S3_REGION: local
+      KORTIX_CONFIG_ARCHIVE_S3_ENDPOINT: http://supabase-kong:8000/storage/v1/s3
+      KORTIX_CONFIG_ARCHIVE_S3_FORCE_PATH_STYLE: "true"
+      KORTIX_CONFIG_ARCHIVE_S3_ACCESS_KEY_ID: ${S3_PROTOCOL_ACCESS_KEY_ID}
+      KORTIX_CONFIG_ARCHIVE_S3_SECRET_ACCESS_KEY: ${S3_PROTOCOL_ACCESS_KEY_SECRET}
+      KORTIX_CAPTURE_S3_BUCKET: kortix-capture
+      KORTIX_CAPTURE_S3_REGION: us-east-1
+      KORTIX_CAPTURE_S3_ENDPOINT: http://capture-store:9000
+      KORTIX_CAPTURE_S3_PUBLIC_ENDPOINT: ${KORTIX_URL}
+      KORTIX_CAPTURE_S3_PROXY_TARGET: http://capture-store:9000
+      KORTIX_CAPTURE_S3_FORCE_PATH_STYLE: "true"
+      KORTIX_CAPTURE_S3_CREATE_BUCKET: "true"
+      KORTIX_CAPTURE_S3_ACCESS_KEY_ID: ${CAPTURE_STORE_ROOT_USER}
+      KORTIX_CAPTURE_S3_SECRET_ACCESS_KEY: ${CAPTURE_STORE_ROOT_PASSWORD}
+      KORTIX_CAPTURE_STS_ROLE_ARN: arn:aws:iam::000000000000:role/kortix-capture-device
+      KORTIX_CAPTURE_STS_ENDPOINT: http://capture-store:9000
+      KORTIX_CAPTURE_INDEX_POLL_SECONDS: "30"
+      KORTIX_PROJECT_SNAPSHOT_MODE: ${KORTIX_PROJECT_SNAPSHOT_MODE:-prefer-s3}
+      KORTIX_PROJECT_SNAPSHOT_S3_BUCKET: kortix-project-snapshots
+      KORTIX_PROJECT_SNAPSHOT_S3_REGION: us-east-1
+      KORTIX_PROJECT_SNAPSHOT_S3_ENDPOINT: http://capture-store:9000
+      KORTIX_PROJECT_SNAPSHOT_S3_PUBLIC_ENDPOINT: ${KORTIX_URL}
+      KORTIX_PROJECT_SNAPSHOT_S3_PROXY_TARGET: http://capture-store:9000
+      KORTIX_PROJECT_SNAPSHOT_S3_FORCE_PATH_STYLE: "true"
+      KORTIX_PROJECT_SNAPSHOT_S3_CREATE_BUCKET: "true"
+      KORTIX_PROJECT_SNAPSHOT_S3_ACCESS_KEY_ID: ${CAPTURE_STORE_ROOT_USER}
+      KORTIX_PROJECT_SNAPSHOT_S3_SECRET_ACCESS_KEY: ${CAPTURE_STORE_ROOT_PASSWORD}
+      LLM_GATEWAY_PROXY_TARGET: http://llm-gateway:8090
+      LLM_GATEWAY_BASE_URL: ${KORTIX_URL}/v1/llm
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+      supabase-kong:
+        condition: service_healthy
+      kortix-migrate:
+        condition: service_completed_successfully
+      capture-store:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "bun -e \"fetch('http://localhost:8008/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: ${KORTIX_API_MEMORY_LIMIT:-2048m}
+    mem_reservation: 256m
+  capture-store:
+    image: cgr.dev/chainguard/minio@sha256:2136d593beacf4461187035eca949fe49abd589d5079735025c711ca58fee0c8
+    command:
+      - server
+      - /data
+      - --address
+      - :9000
+    environment:
+      MINIO_ROOT_USER: ${CAPTURE_STORE_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${CAPTURE_STORE_ROOT_PASSWORD}
+      MINIO_BROWSER: off
+    volumes:
+      - kortix-capture-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /minio/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && read -r status <&3 && [[ $$status == *' 200 '* ]]"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: ${KORTIX_CAPTURE_STORE_MEMORY_LIMIT:-1024m}
+    mem_reservation: 128m
+  llm-gateway:
+    image: ${GATEWAY_IMAGE}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      PORT: "8090"
+      KORTIX_API_URL: http://kortix-api:8008
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN}
+      GATEWAY_MAX_REQUEST_BYTES: ${KORTIX_GATEWAY_MAX_REQUEST_BYTES:-}
+    depends_on:
+      kortix-api:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "bun -e \"fetch('http://localhost:8090/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: ${KORTIX_GATEWAY_MEMORY_LIMIT:-2048m}
+    mem_reservation: 256m
+  kortix-updater:
+    image: docker:29.6.1-cli@sha256:862099ada15c669000bef53aa4cb9d821262829f45b0dda2159ccb276443043b
+    working_dir: ${KORTIX_INSTANCE_DIR}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - apk add --no-cache tzdata >/dev/null 2>&1 || true; exec /bin/sh ./updater.sh "$@"
+      - sh
+    environment:
+      KORTIX_AUTO_UPDATE: ${KORTIX_AUTO_UPDATE}
+      KORTIX_UPDATE_TIME: ${KORTIX_UPDATE_TIME:-02:00}
+      KORTIX_UPDATE_TZ: ${KORTIX_UPDATE_TZ:-America/New_York}
+      KORTIX_ALLOW_DOWNTIME: ${KORTIX_ALLOW_DOWNTIME:-0}
+      KORTIX_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
+      KORTIX_INSTANCE_DIR: ${KORTIX_INSTANCE_DIR}
+      KORTIX_APP_REPLICAS: ${KORTIX_APP_REPLICAS:-1}
+      KORTIX_ROLLOUT_TIMEOUT: ${KORTIX_ROLLOUT_TIMEOUT:-300}
+      KORTIX_CRASH_WATCH_S: ${KORTIX_CRASH_WATCH_S:-20}
+      KORTIX_MIN_FREE_DISK_MB: ${KORTIX_MIN_FREE_DISK_MB:-2048}
+      KORTIX_UPDATE_WEBHOOK_URL: ${KORTIX_UPDATE_WEBHOOK_URL:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${KORTIX_INSTANCE_DIR}:${KORTIX_INSTANCE_DIR}
+      - kortix-updater-state:/state
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 256m
+    mem_reservation: 64m
+  cloudflared:
+    image: cloudflare/cloudflared:2026.7.2
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+    depends_on:
+      kortix-api:
+        condition: service_started
+    restart: unless-stopped
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 128m
+    mem_reservation: 32m
+volumes:
+  db-config: null
+  deno-cache: null
+  kortix-updater-state: null
+  kortix-caddy-data: null
+  kortix-capture-data: null

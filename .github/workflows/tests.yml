@@ -1,0 +1,38 @@
+name: Distribution checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: distribution-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  BUN_VERSION: '1.4.4'
+jobs:
+  installer:
+    name: Source integrity and installer safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: python3 selfhost/verify_source.py
+      - run: python3 -m unittest discover -s selfhost/tests -v
+      - run: bash -n selfhost/build.sh selfhost/test-contract.sh
+      - run: python3 selfhost/manage.py --help
+  docker-cloud:
+    name: Docker Cloud lifecycle and transport contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: bash selfhost/test-contract.sh
+# GitHub holds source and runs verification only. Production deploys use SSH.
+# These jobs never receive Cloud credentials, create paid sandboxes, publish
+# application images, or access a production deployment.

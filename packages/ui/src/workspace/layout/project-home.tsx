@@ -1,0 +1,509 @@
+'use client';
+
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { ACCOUNT_PANEL_PARAM, hubTarget } from '../../internal/stores/account-panel-store';
+import { SplitNoticeBanner } from '../settings/split-notice-banner';
+import { useTranslations } from '../../i18n';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import {
+  ComposerChatInput,
+  type ComposerChatCall,
+  type ComposerOptions,
+} from '../../session/composer/composer-chat-input';
+import { ComposerDropZone } from '../../session/composer/composer-drop-zone';
+import type { DraftScope } from '../../session/composer/draft/composer-draft';
+import type { AttachedFile } from '../../session/composer/session-chat-input';
+import { SidebarToggle } from '../../internal/layout/sidebar-toggle';
+import { PROJECT_ACTIONS } from '../../internal/lib/project-actions';
+import { useIsMobile } from '../../internal/hooks';
+import { useProjectCan, useProjectCans } from '../../internal/lib/use-project-can';
+import { useComposerPrefillStore } from '../../internal/stores/composer-prefill-store';
+import {
+  firstChatHref,
+  isFirstChatRequested,
+  useFirstChatPending,
+  useFirstChatStore,
+} from '../../internal/stores/first-chat-store';
+import { ProjectScope } from '../../internal/project-scope';
+import { useUiComponents, useUiRouter, useUiSearchParams } from '../../providers/ui-provider';
+import {
+  getProject,
+  listProjectAccessRequests,
+  listProjectSandboxes,
+  setProjectOnboardingComplete,
+  type SandboxTemplate,
+  type SessionPromptOverrides,
+} from '@kortix/sdk';
+import type { AttachmentSubmission } from '../../session/composer/attachment-submission';
+import { contract, invalidateProject, qk, useProjectConfig, useRuntimeAgents, type Command } from '@kortix/sdk/react';
+import { MY_KORTIX_SANDBOX_SLUG, isMyKortixAgentName } from '@kortix/shared';
+import { AccessRequestsBell } from '../home/access-requests-bell';
+import { NoAgentHome, type NoAgentReason } from '../home/no-agent-home';
+import { composerSelectableAgents } from '../../session/composer/composer-agent-access';
+import { FirstChat } from '../home/first-chat';
+import { SandboxPicker } from '../home/sandbox-picker';
+import { ProjectHomeWallpaper, ProjectHomeWelcomeBody } from '../home/welcome-body';
+import { useProjectHomeCall } from './use-project-home-call';
+import { useProjectHomeSend } from './use-project-home-send';
+
+// This path is this view's public surface — the instant session shell and the
+// IAM tests already import from here, so the moved pieces keep their address.
+export { ProjectHomeWelcomeBody } from '../home/welcome-body';
+
+/** What finishing the onboarding takes. Module-level: the batch key needs a stable list. */
+const ONBOARDING_ACTIONS = [
+  PROJECT_ACTIONS.PROJECT_SETTINGS_WRITE,
+  PROJECT_ACTIONS.PROJECT_SESSION_START,
+] as const;
+
+/** How often a home with no runnable agent re-reads the project, waiting for one. */
+const NO_AGENT_POLL_MS = 15_000;
+
+export interface ProjectHomeSendOptions extends ComposerOptions {
+  sandbox_slug?: string;
+}
+
+/**
+ * The project's home screen: the wallpaper, the floating sidebar opener, the
+ * access-requests bell, and the centred column holding the composer and the
+ * setup checklist.
+ *
+ * Until a new project's first message is sent, the column is the first chat
+ * instead (`home/first-chat.tsx`): the same composer, docked at the bottom
+ * under a welcome from Kortix.
+ *
+ * With `onboarding`, a project that is not onboarded yet redirects here, and
+ * the first chat's composer holds "Onboard me". It sends itself as soon as a
+ * model is usable; the agent runs the onboarding from there (the
+ * `kortix-onboarding` skill). Without a model the composer's tray offers
+ * Upgrade and Connect model.
+ *
+ * This component owns the composer's WIRING — which sandbox, which agent, what
+ * a send carries, what a prefill does. Everything it renders is a component of
+ * its own under `../home/`, and the column's layout lives in
+ * `ProjectHomeWelcomeBody` because the instant session shell renders that same
+ * column with none of this wiring.
+ */
+export type ProjectHomeProps = {
+  projectId: string;
+  /**
+   * Replaces the send. Default: `useProjectHomeSend` creates the session with
+   * the prompt and opens it.
+   */
+  onSend?: (
+    text: string,
+    files: AttachedFile[] | undefined,
+    options?: ProjectHomeSendOptions,
+    attachments?: AttachmentSubmission,
+  ) => void | Promise<void>;
+  /** With `onSend`: a create is in flight. */
+  busy?: boolean;
+  /** With the default send: runs first; throw to refuse the send (the draft stays). */
+  beforeSend?: () => Promise<void>;
+  /**
+   * A project that is not onboarded yet opens on the first chat, whose
+   * composer sends "Onboard me" once a model is usable. Off by default: a
+   * white-label or SDK host decides its own first run. Kortix web turns it on.
+   */
+  onboarding?: boolean;
+};
+
+/**
+ * Self-contained: the composer and its pickers read the project from
+ * `SessionIdsProvider`, so the home provides it for its own subtree.
+ */
+export function ProjectHome(props: ProjectHomeProps) {
+  return (
+    <ProjectScope projectId={props.projectId}>
+      <ProjectHomeView {...props} />
+    </ProjectScope>
+  );
+}
+
+function ProjectHomeView({
+  projectId,
+  onSend,
+  busy,
+  beforeSend,
+  onboarding: onboardingEnabled = false,
+}: ProjectHomeProps) {
+  const defaultSend = useProjectHomeSend(projectId, { beforeSend });
+  const { HomeAnnouncement } = useUiComponents();
+  const send = onSend ?? defaultSend.send;
+  const creating = onSend ? !!busy : defaultSend.sending;
+  const tI18nHardcoded = useTranslations('hardcodedUi');
+  const tFirstChat = useTranslations('firstChat');
+  // The first chat never ends, but it opens only when asked for
+  // (`firstChatHref`: the sidebar row or the onboarding exit). Plain project
+  // home, which "New session" opens, stays the normal home.
+  const searchParams = useUiSearchParams();
+  const firstChatPending = useFirstChatPending(projectId);
+  const firstChatRequested = isFirstChatRequested(searchParams);
+  const router = useUiRouter();
+  const queryClient = useQueryClient();
+
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [prefill, setPrefill] = useState<{
+    text: string;
+    id: number;
+    submit?: boolean | 'when-ready';
+    files?: AttachedFile[];
+    options?: SessionPromptOverrides;
+  } | null>(null);
+
+  // The sandbox TEMPLATE catalog, not live sandbox health (that is
+  // `useSandboxHealth`, its own key and its own polling). Changed only by this
+  // app's own mutations, which invalidate `qk.project.sandboxes` (a prefix of
+  // this key) — see `FRESHNESS.sandboxes`. Same entry as the Customize prefetch
+  // and the agent editor: one `GET /sandboxes` per load, not two.
+  const sandboxesQuery = useQuery({
+    queryKey: qk.project.sandboxTemplates(projectId),
+    queryFn: () => listProjectSandboxes(projectId),
+    ...contract('config'),
+    refetchOnWindowFocus: false,
+  });
+  const sandboxItems: SandboxTemplate[] = sandboxesQuery.data?.items ?? [];
+  const defaultSlug = sandboxesQuery.data?.default_slug ?? 'default';
+  const activeSlug = selectedSlug ?? defaultSlug;
+  const metaSelected = isMyKortixAgentName(selectedAgent);
+
+  useEffect(() => {
+    if (metaSelected) setSelectedSlug(null);
+  }, [metaSelected]);
+
+  const showSandboxPicker = sandboxItems.length >= 1;
+  // `GET /projects/:id/access-requests` asserts project.members.manage
+  // (`apps/api/src/projects/routes/access-requests.ts`), so firing it for a plain member is
+  // a guaranteed 403 for a bell they could never act on anyway. Probe the leaf
+  // first and keep the query disabled until it says yes — `showErrors: false`
+  // only silenced the toast, the request still went out and still failed.
+  const canManageMembers =
+    useProjectCan(projectId, PROJECT_ACTIONS.PROJECT_MEMBERS_MANAGE).allowed === true;
+  const accessRequests = useQuery({
+    queryKey: qk.project.accessRequests(projectId),
+    queryFn: () => listProjectAccessRequests(projectId, { showErrors: false }),
+    retry: false,
+    enabled: canManageMembers,
+    ...contract('inventory'),
+    refetchOnWindowFocus: false,
+  });
+
+  // The bare project row (`GET /projects/:id`, one database read), the same
+  // entry page.tsx and the shell read. Not the detail: it reads the
+  // repository and can take seconds, and the home must not wait on it. It
+  // resolves `account_id` for the access-requests bell, the onboarding stamp
+  // and the notification-center flag.
+  const projectRowQuery = useQuery({
+    queryKey: qk.project.summary(projectId),
+    queryFn: () => getProject(projectId),
+    enabled: !!projectId,
+    ...contract('config'),
+  });
+  const accountId = projectRowQuery.data?.account_id;
+  // The promo waits for the onboarding stamp (KRTX-2378).
+  const onboarded = Boolean(
+    (projectRowQuery.data?.metadata as { onboarding_completed_at?: string } | undefined)
+      ?.onboarding_completed_at,
+  );
+  // Only someone who can finish the onboarding is sent into it: the kickoff
+  // starts a session (project.session.start) and the stamp,
+  // `PATCH /projects/:id/onboarding`, asserts project.settings.write. A role
+  // missing either would auto-send a kickoff whose stamp is refused, and get
+  // the onboarding again on every visit. `=== true`: an unresolved probe
+  // never redirects someone the onboarding is not for.
+  const onboardingCans = useProjectCans(projectId, ONBOARDING_ACTIONS);
+  const canSetUpProject = ONBOARDING_ACTIONS.every(
+    (action) => onboardingCans[action]?.allowed === true,
+  );
+  // No agent the viewer may run: every send would be refused ("No agents
+  // available to you"), so the chat area is a blocked state instead
+  // (`home/no-agent-home.tsx`). The roster is the composer's own
+  // (`useRuntimeAgents`), so the two never disagree. `undefined` while it
+  // loads: a pending roster blocks nothing.
+  const projectConfig = useProjectConfig(projectId);
+  const { data: roster } = useRuntimeAgents({ projectId });
+  const writeProbe = useProjectCan(projectId, PROJECT_ACTIONS.PROJECT_WRITE);
+  const canWriteProject = writeProbe.allowed;
+  // Waits for the permission probe too, so an owner never sees the member
+  // variant flash before the setup one.
+  const noAgent =
+    roster !== undefined && !writeProbe.isLoading && composerSelectableAgents(roster).length === 0;
+  // A member is told `restricted`, never `missing`: only someone who can read
+  // the manifest learns the repository has none, and only someone who can
+  // push gets the setup prompt.
+  const noAgentReason: NoAgentReason | null = !noAgent
+    ? null
+    : projectConfig?.manifest_health?.state === 'missing' && canWriteProject
+      ? 'setup'
+      : canWriteProject
+        ? 'empty'
+        : 'noAccess';
+  // The detail key is the prefix of the roster's key, so both re-read.
+  const recheckAgents = useCallback(
+    () => void queryClient.invalidateQueries({ queryKey: qk.project.detail(projectId) }),
+    [queryClient, projectId],
+  );
+  // A push on the upstream is seen within one mirror refresh (60 s): re-read
+  // while blocked, and when the tab regains focus (the person comes back from
+  // their editor), so the home turns into the chat by itself.
+  useEffect(() => {
+    if (!noAgent) return;
+    const timer = setInterval(recheckAgents, NO_AGENT_POLL_MS);
+    window.addEventListener('focus', recheckAgents);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', recheckAgents);
+    };
+  }, [noAgent, recheckAgents]);
+  const onboarding =
+    onboardingEnabled && projectRowQuery.isSuccess && !onboarded && canSetUpProject && !noAgent;
+  // The onboarding lands on the first chat: it starts the chat (the sidebar
+  // row) and moves the address to it. Rendered as the first chat from this
+  // render on, so the usual home never paints in between.
+  // An old account-settings link (`?accountId=`, or a bare `?accountTab=`) is
+  // the hub router's to resolve (`account-hub-router.tsx`): replacing the
+  // address here first would drop it, and the link would land on the first
+  // chat instead of its section.
+  const hubLinkPending = Boolean(searchParams?.get(ACCOUNT_PANEL_PARAM) || searchParams?.get('accountTab'));
+  useEffect(() => {
+    if (!onboarding || hubLinkPending) return;
+    useFirstChatStore.getState().start(projectId);
+    if (!firstChatRequested) router.replace(firstChatHref(projectId));
+  }, [onboarding, hubLinkPending, firstChatRequested, projectId, router]);
+  const firstChat = (firstChatPending && firstChatRequested) || onboarding;
+
+  // Once per mount: a second prefill id would send a second kickoff. Not
+  // before the config is read: a repository that runs no agent turns the
+  // home into the setup page, and a kickoff queued before that is known
+  // would be refused.
+  const configRead = roster !== undefined;
+  const kickoffQueuedRef = useRef(false);
+  useEffect(() => {
+    if (!onboarding || !configRead || kickoffQueuedRef.current) return;
+    kickoffQueuedRef.current = true;
+    setPrefill({ text: tFirstChat('kickoff'), id: Date.now(), submit: 'when-ready' });
+  }, [onboarding, configRead, tFirstChat]);
+  // Resolved during render so the bell is an anchor and Next holds its payload
+  // in the segment cache. `account_id` arrives on a different query than the
+  // count, so the bell can paint before the destination exists.
+  const accessRequestsTo = accountId
+    ? hubTarget(accountId, { tab: 'access-projects', project: projectId })
+    : null;
+
+  const handleSend = useCallback(
+    (
+      text: string,
+      files: AttachedFile[] | undefined,
+      options: ComposerOptions,
+      attachments?: AttachmentSubmission,
+    ) => {
+      const sent = Promise.resolve(
+        send(
+          text,
+          files,
+          {
+            ...options,
+            ...(metaSelected
+              ? { sandbox_slug: MY_KORTIX_SANDBOX_SLUG }
+              : selectedSlug
+                ? { sandbox_slug: selectedSlug }
+                : {}),
+          },
+          attachments,
+        ),
+      );
+      // The first send opened a session: the project is onboarded. Stamped
+      // only after the create resolves, so a refused send keeps the
+      // onboarding for the next visit.
+      if (onboarding) {
+        // Spent: a composer mounted later must not apply it again.
+        setPrefill(null);
+        void sent
+          .then(() => setProjectOnboardingComplete(projectId, true))
+          .then(() => invalidateProject(queryClient, projectId))
+          .catch(() => undefined);
+      }
+      return sent;
+    },
+    [metaSelected, selectedSlug, send, onboarding, projectId, queryClient],
+  );
+
+  // Nothing typed: the Send button calls a new session instead (flag
+  // `voice_call`, `use-project-home-call.ts`), with the sandbox chosen here as
+  // a send gets it. Only with the default send: a host's own `onSend` decides
+  // what a new session is, and a call would bypass it. Not in the first chat:
+  // it is the onboarding, and its kickoff is a typed message.
+  const homeCall = useProjectHomeCall(projectId, { beforeSend });
+  const call = useMemo<ComposerChatCall | undefined>(() => {
+    if (!homeCall || onSend || firstChat) return undefined;
+    return {
+      inCall: homeCall.inCall,
+      onCall: (options) =>
+        homeCall.onCall({
+          ...options,
+          ...(metaSelected
+            ? { sandbox_slug: MY_KORTIX_SANDBOX_SLUG }
+            : selectedSlug
+              ? { sandbox_slug: selectedSlug }
+              : {}),
+        }),
+    };
+  }, [homeCall, onSend, firstChat, metaSelected, selectedSlug]);
+
+  const isMobile = useIsMobile();
+  const pendingPrefill = useComposerPrefillStore((s) => s.prefillByProject[projectId]);
+  const consumePrefill = useComposerPrefillStore((s) => s.consume);
+
+  // Send rejects on failure so the composer keeps its attachment handles.
+  // These callers have no composer draft; the session hook shows the error.
+  const sendOutsideComposer = useCallback(
+    (text: string, options: ComposerOptions) => {
+      void Promise.resolve(handleSend(text, undefined, options)).catch(() => undefined);
+    },
+    [handleSend],
+  );
+
+  useEffect(() => {
+    if (!pendingPrefill) return;
+    consumePrefill(projectId);
+    setPrefill({
+      text: pendingPrefill.text,
+      id: Date.now(),
+      submit: pendingPrefill.submit,
+      files: pendingPrefill.files,
+      options: pendingPrefill.options,
+    });
+  }, [pendingPrefill, projectId, consumePrefill]);
+
+  const handleCommand = useCallback(
+    (cmd: Command, args: string | undefined, options: ComposerOptions) => {
+      sendOutsideComposer(`/${cmd.name}${args ? ` ${args}` : ''}`, options);
+    },
+    [sendOutsideComposer],
+  );
+
+  const applySuggestion = (s: string) => {
+    setPrefill({ text: s, id: Date.now() });
+  };
+
+  // The home composer has no session yet, so its unsent draft is keyed by the
+  // project. Memoized because it crosses into a `React.memo`-wrapped composer.
+  const draftScope = useMemo<DraftScope>(() => ({ kind: 'project', projectId }), [projectId]);
+
+  // The template chooser lives inside the overrides panel, not on the bar —
+  // the bar keeps only agent + model. Meta takes a fixed sandbox, so it gets
+  // the indicator instead of a picker whose choice would be ignored.
+  const sandboxSlot =
+    !metaSelected && showSandboxPicker
+      ? {
+          summary: selectedSlug
+            ? (sandboxItems.find((t) => t.slug === selectedSlug)?.name ?? selectedSlug)
+            : 'Agent default',
+          overridden: selectedSlug !== null,
+          control: (
+            <SandboxPicker
+              items={sandboxItems}
+              activeSlug={activeSlug}
+              selectedSlug={selectedSlug}
+              onSelect={setSelectedSlug}
+            />
+          ),
+          onReset: () => setSelectedSlug(null),
+          resetLabel: 'Reset to agent default',
+        }
+      : undefined;
+
+  const composer = (
+    <ComposerChatInput
+      onSend={handleSend}
+      onCommand={handleCommand}
+      projectId={projectId}
+      draftScope={draftScope}
+      // `busy` here means "create in flight" — spinner in the send slot,
+      // input locked. NOT isBusy (that renders agent-running stop-button
+      // semantics, which leave the composer with no button at all here).
+      isSending={creating}
+      disabled={creating}
+      // The home composer navigates to the new session on send — don't
+      // clear it first (that would drop the text on a gated send). The
+      // message rides across via `create.pending_prompt` and reappears
+      // as the instant shell's optimistic turn.
+      clearOnSend={false}
+      autoFocus
+      // Desktop: a hero composer floating mid-page has no column for a second
+      // rail to align to, so the attach/agent/context controls ride on the
+      // toolbar itself, ahead of the model selector, and the `/` menu opens
+      // BELOW the card, into the empty lower half, instead of shoving the
+      // heading up. Mobile: the toolbar is too narrow to hold them next to the
+      // model selector — the labels overlap — so it uses the session page's
+      // row beneath the card. The first chat docks the composer at the bottom
+      // like a session does, so it keeps a session's defaults: the row
+      // beneath, the menu above.
+      underbarPlacement={firstChat || isMobile ? 'below' : 'inline'}
+      slashMenuPlacement={firstChat ? 'above' : 'below'}
+      placeholder={
+        firstChat
+          ? tFirstChat('placeholder')
+          : tI18nHardcoded.raw(
+              'autoFeaturesCoWorkerProjectLayoutProjectHomeJsxAttrPlaceholder115e6c2d',
+            )
+      }
+      prefill={prefill}
+      onAgentSelectionChange={setSelectedAgent}
+      sandboxSlot={sandboxSlot}
+      call={call}
+    />
+  );
+
+  return (
+    // A file dropped anywhere on the page attaches to the composer, as on a
+    // session page.
+    <ComposerDropZone className="bg-background relative flex min-h-0 flex-1 flex-col overflow-hidden lg:px-4.5">
+      <ProjectHomeWallpaper />
+      <SidebarToggle placement="floating" />
+      <AccessRequestsBell
+        requests={accessRequests.data?.requests ?? []}
+        to={accessRequestsTo}
+      />
+      {/* Not while the project is in its first-chat era, and not over the
+          onboarding wizard: onboarding owns those screens. The era starts when
+          the wizard's exit starts the first chat and then stays for the
+          browser's lifetime (`first-chat-store.ts`: "Onboarding starts it, and
+          it stays" — `finish` runs only on sign-out), so a wizard exit (which
+          stamps the project) can never be followed by the promo popping over
+          the project page the user just asked for (KRTX-2635). On later
+          projects, which the create flow stamps without a wizard, the era
+          never starts and the promo shows as before. Not over the no-agent
+          state either: that page has one job. */}
+      {firstChatPending || !onboarded || noAgent || !HomeAnnouncement ? null : <HomeAnnouncement />}
+
+      {/* What changed when a legacy account's workspaces became their own (C9). */}
+      <div className="relative z-10 mx-auto w-full max-w-2xl px-4 pt-14 empty:hidden">
+        <SplitNoticeBanner workspaceId={projectId} />
+      </div>
+
+      {/* No bubble or "Thinking" row is painted here on send. The page stays
+          the welcome screen with the sentence held in the composer until the
+          create resolves and the session route opens; the instant shell draws
+          the first turn there (`useFirstPromptPreviewStore`). Painting the turn
+          here left a slow or stuck create looking like a live session. */}
+      {noAgentReason ? (
+        <NoAgentHome
+          reason={noAgentReason}
+          repoUrl={projectRowQuery.data?.repo_url}
+          branch={projectRowQuery.data?.default_branch}
+        />
+      ) : firstChat ? (
+        <FirstChat composer={composer} />
+      ) : (
+        <ProjectHomeWelcomeBody
+          projectId={projectId}
+          onPickSuggestion={applySuggestion}
+          composer={composer}
+        />
+      )}
+    </ComposerDropZone>
+  );
+}

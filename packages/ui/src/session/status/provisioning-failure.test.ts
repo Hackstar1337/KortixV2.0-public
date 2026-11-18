@@ -1,0 +1,189 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import { testUiTranslator } from '../../test-utils/intl';
+import {
+  pendingSessionPromptForRecovery,
+  pendingSessionPromptFromMetadata,
+  provisioningFailurePresentation,
+  recoveryPromptToSendOnRetry,
+} from './provisioning-failure';
+
+describe('provisioningFailurePresentation', () => {
+  test('shows a specific capacity title and the API-owned message', () => {
+    expect(
+      provisioningFailurePresentation(
+        {
+          failureCategory: 'provider-capacity',
+          provisioningError: 'provider SDK text that must stay diagnostic-only',
+          errorMessage: 'The sandbox provider is at capacity right now. Try again in a minute.',
+        },
+        undefined,
+        testUiTranslator,
+      ),
+    ).toEqual({
+      title: 'Sandbox capacity is full',
+      message: 'The sandbox provider is at capacity right now. Try again in a minute.',
+      retryable: true,
+    });
+  });
+
+  test('shows Git failures as Git failures', () => {
+    const result = provisioningFailurePresentation(
+      {
+        failureCategory: 'git-auth',
+        errorMessage: 'Check the Git credentials.',
+      },
+      undefined,
+      testUiTranslator,
+    );
+
+    expect(result.title).toBe('Git access failed');
+    expect(result.message).toBe('Check the Git credentials.');
+    expect(result.retryable).toBe(true);
+  });
+
+  test('uses provider-neutral fallback copy', () => {
+    expect(provisioningFailurePresentation({}, 'SampleCo runtime', testUiTranslator)).toEqual({
+      title: "Couldn't start SampleCo runtime",
+      message: 'The sandbox provider could not start this session. Try again.',
+      retryable: true,
+    });
+  });
+});
+
+describe('the retry path queues the durable row itself', () => {
+  test('no stash builder survives — a legacy hand-off is POSTed, never re-stashed', () => {
+    // `startStashFromPendingSessionPrompt` re-created the browser hand-off on
+    // Retry, which kept the prompt losable for one more boot. The session page
+    // now POSTs a legacy `pending_prompt.text` straight to the inbox
+    // (`startSessionWithPrompt`) and strips the metadata copy; a session
+    // created by the current API never enters this path at all — its first
+    // prompt has been a durable row since the create transaction.
+    const source = readFileSync(resolve(import.meta.dir, './provisioning-failure.ts'), 'utf8');
+    expect(source).not.toContain('startStashFromPendingSessionPrompt');
+  });
+});
+
+describe('pendingSessionPromptFromMetadata', () => {
+  test('reads a durable prompt and its delivery options', () => {
+    expect(
+      pendingSessionPromptFromMetadata({
+        pending_prompt: {
+          text: 'Map this parcel.',
+          agent: 'gis',
+          model: { providerID: 'kortix', modelID: 'claude-sonnet-4-5' },
+          variant: 'high',
+          attachment_names: ['parcel.geojson'],
+        },
+      }),
+    ).toEqual({
+      text: 'Map this parcel.',
+      agent: 'gis',
+      model: { providerID: 'kortix', modelID: 'claude-sonnet-4-5' },
+      variant: 'high',
+      attachment_names: ['parcel.geojson'],
+    });
+  });
+
+  test('reads a file-only recovery copy with empty text', () => {
+    expect(
+      pendingSessionPromptFromMetadata({
+        pending_prompt: { text: '', attachment_names: ['parcel.geojson'] },
+      }),
+    ).toEqual({
+      text: '',
+      agent: null,
+      model: null,
+      variant: null,
+      attachment_names: ['parcel.geojson'],
+    });
+  });
+
+  test('rejects missing, cleared, content-free, and malformed recovery copies', () => {
+    expect(pendingSessionPromptFromMetadata(undefined)).toBeNull();
+    expect(pendingSessionPromptFromMetadata({ pending_prompt: null })).toBeNull();
+    expect(pendingSessionPromptFromMetadata({ pending_prompt: [] })).toBeNull();
+    expect(pendingSessionPromptFromMetadata({ pending_prompt: { text: '   ' } })).toBeNull();
+    expect(
+      pendingSessionPromptFromMetadata({
+        pending_prompt: { text: 'Map this parcel.', model: { providerID: 'kortix' } },
+      }),
+    ).toBeNull();
+    expect(
+      pendingSessionPromptFromMetadata({
+        pending_prompt: { text: 'Map this parcel.', attachment_names: [42] },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe('pendingSessionPromptForRecovery', () => {
+  const SESSION_ID = '00000000-0000-4000-8000-000000000001';
+  const AGENT_PROMPT = 'Summarize the open pull requests and post the summary.';
+
+  test('shows the initial_prompt of a session an agent, trigger or channel created', () => {
+    // Spawned, trigger, channel, MCP and marketplace sessions store their
+    // first prompt as `metadata.initial_prompt`, never as `pending_prompt`.
+    expect(
+      pendingSessionPromptForRecovery(SESSION_ID, { source: 'agent', initial_prompt: AGENT_PROMPT }),
+    ).toEqual({
+      text: AGENT_PROMPT,
+      agent: null,
+      model: null,
+      variant: null,
+      attachment_names: [],
+      redeliveredOnRestart: true,
+    });
+  });
+
+  test('hides the initial_prompt once the runtime ran it', () => {
+    // The restart re-delivers `initial_prompt` only while the session has no
+    // runtime session id. After that it is history, not a saved prompt.
+    expect(
+      pendingSessionPromptForRecovery(SESSION_ID, { initial_prompt: AGENT_PROMPT }, 'ses_runtime'),
+    ).toBeNull();
+  });
+
+  test('ignores a blank initial_prompt', () => {
+    expect(pendingSessionPromptForRecovery(SESSION_ID, { initial_prompt: '  ' })).toBeNull();
+    expect(pendingSessionPromptForRecovery(SESSION_ID, { initial_prompt: 42 })).toBeNull();
+  });
+
+  test('a legacy pending_prompt.text wins and stays client-delivered', () => {
+    expect(
+      pendingSessionPromptForRecovery(SESSION_ID, {
+        pending_prompt: { text: 'legacy hand-off' },
+        initial_prompt: AGENT_PROMPT,
+      }),
+    ).toMatchObject({ text: 'legacy hand-off', redeliveredOnRestart: false });
+  });
+});
+
+describe('recoveryPromptToSendOnRetry', () => {
+  test('sends nothing for an initial_prompt: the restart re-delivers it', () => {
+    const prompt = pendingSessionPromptForRecovery('00000000-0000-4000-8000-000000000002', {
+      initial_prompt: 'Run the nightly report.',
+    });
+    expect(prompt?.text).toBe('Run the nightly report.');
+    expect(recoveryPromptToSendOnRetry(prompt)).toBeNull();
+  });
+
+  test('sends a legacy pending_prompt.text once, as before', () => {
+    const prompt = pendingSessionPromptForRecovery('00000000-0000-4000-8000-000000000003', {
+      pending_prompt: { text: 'legacy hand-off', agent: 'builder' },
+    });
+    expect(recoveryPromptToSendOnRetry(prompt)).toEqual({
+      text: 'legacy hand-off',
+      agent: 'builder',
+      model: null,
+      variant: null,
+      attachment_names: [],
+    });
+  });
+
+  test('sends nothing when there is no prompt', () => {
+    expect(recoveryPromptToSendOnRetry(null)).toBeNull();
+  });
+});

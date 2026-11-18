@@ -1,0 +1,815 @@
+// A project's Files: one drive per project, a tree of folders, and access per
+// folder (read, write or manage) for people, teams, agents and the whole
+// project. Each person has their own folder, `/Users/<name>`, private until
+// they share it and mounted as their desktop in their sessions.
+
+import { ApiError, backendApi } from '../../http/api-client';
+import { authenticatedFetch } from '../../http/auth';
+import { abortableDelay } from '../../http/abort';
+import { platformConfig } from '../../http/config';
+import { isReportedWriteFailure } from '../../http/response-error';
+import { platformRequestHeaders } from '../../http/transport';
+import { unwrap } from './shared';
+import { stripTrailingSlashes } from '../../../platform/strings';
+
+export type FolderLevel = 'read' | 'write' | 'manage';
+export type FolderAccess = 'none' | FolderLevel;
+/**
+ * Who a folder grant names. A grant anyone makes names an `agent` (a shared
+ * Drive added to it, with `shared_drives` on): a person reaches it through an
+ * agent they may use. `user` and `group` are only Kortix's own grants (a
+ * person's folder, a private channel's members). `project` is never returned
+ * or accepted since 2026-11-03 (kept so existing code compiles).
+ */
+export type FolderPrincipalType = 'user' | 'group' | 'agent' | 'project';
+
+export interface Drive {
+  driveId: string;
+  accountId: string;
+  projectId: string;
+  kind: 'project';
+  name: string;
+  /** Null when the drive has no files yet or its size could not be read. */
+  sizeBytes: number | null;
+  sizeLimitBytes: number | null;
+  fileCount: number | null;
+  lastChangeAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** The caller's access at the top of the drive: `manage` for project admins. */
+  access: FolderAccess;
+  /** The caller's own folder, `/Users/<name>`. */
+  personalFolder: string | null;
+  /** "(conflict ...)" copies in folders the caller can see that nobody resolved or dismissed yet. */
+  openConflicts?: number;
+  /** The shared Drives the caller reaches through an agent they may use; empty while `shared_drives` is off. */
+  sharedWithMe?: Array<{ path: string; access: FolderAccess }>;
+  /** The project's `shared_drives` flag: off, Drive is My files only. Absent from an API older than 2026-11-03. */
+  sharedDrives?: boolean;
+}
+
+/**
+ * The limits a project's Files answer to (`GET /drives/:driveId/usage`).
+ * `null` = no Kortix limit (a self-hosted install without billing); the
+ * storage behind it still has its own.
+ */
+export interface DriveLimits {
+  /** What this project's Files may hold. */
+  projectBytes: number | null;
+  /** What all the account's projects' Files may hold together. */
+  accountBytes: number | null;
+  /** The largest one file. */
+  fileBytes: number;
+  /** One raw upload request; {@link uploadDriveFile} sends a larger file in blocks. */
+  requestBytes: number;
+  /** The largest folder a session mounts. A larger folder stays out of sessions. */
+  folderMountBytes: number;
+  /** Folders one session mounts at most. */
+  mountsPerSession: number;
+}
+
+/** A folder sessions mount, against {@link DriveLimits.folderMountBytes}. */
+export interface DriveFolderUsage {
+  path: string;
+  bytes: number;
+  /** False when storage stopped before the end of the folder: `bytes` is then a floor. */
+  complete: boolean;
+  /** `near_limit` from 80 % of the folder-mount cap; `over_limit` past it: sessions cannot mount it. */
+  state: 'ok' | 'near_limit' | 'over_limit';
+}
+
+/** What a project's Files hold, against their limits. */
+export interface DriveUsage {
+  driveId: string;
+  projectId: string;
+  /** Null when storage could not say. */
+  usedBytes: number | null;
+  fileCount: number | null;
+  limits: DriveLimits;
+  /** The account's Files across its projects, when the account has a limit. */
+  account: { usedBytes: number; limitBytes: number; complete: boolean } | null;
+  /** The folders the caller can see that sessions mount. */
+  folders: DriveFolderUsage[];
+}
+
+/**
+ * One project's Files in {@link AccountStorageUsage}.
+ *
+ * @deprecated Use `AccountStorageWorkspace`. Kept permanently.
+ */
+export interface AccountStorageProject {
+  projectId: string;
+  name: string;
+  driveId: string;
+  /** Null when storage could not say. */
+  usedBytes: number | null;
+  fileCount: number | null;
+}
+
+/** The workspace name of {@link AccountStorageProject}: the same type. */
+export type AccountStorageWorkspace = AccountStorageProject;
+
+/** What an account's Files hold, per project, against the plan's limits. */
+export interface AccountStorageUsage {
+  accountId: string;
+  usedBytes: number;
+  /** False when storage could not say what some project holds. */
+  complete: boolean;
+  limits: DriveLimits;
+  /** Largest first. */
+  projects: AccountStorageProject[];
+}
+
+/**
+ * The `code` of every refusal of a Files limit. Each comes with the limit it
+ * names and its numbers ({@link DriveLimitRefusal}):
+ * - `storage_limit_exceeded` (403): the project's or the account's Files are full.
+ * - `file_too_large` (413): one file over {@link DriveLimits.fileBytes}.
+ * - `payload_too_large` (413): one request body over its cap.
+ * - `sub_path_too_large` (422): a write that takes a folder sessions mount past the folder-mount cap.
+ * - `transfer_limit_exceeded` (429): storage is busy; send again after `Retry-After`.
+ * - `quota_exceeded` (403): the storage behind Kortix is at capacity.
+ */
+export const DRIVE_LIMIT_CODES = [
+  'storage_limit_exceeded',
+  'file_too_large',
+  'payload_too_large',
+  'sub_path_too_large',
+  'transfer_limit_exceeded',
+  'quota_exceeded',
+] as const;
+
+export type DriveLimitCode = (typeof DRIVE_LIMIT_CODES)[number];
+
+/** A refused Files write, read off its error: which limit, and the numbers the server sent. */
+export interface DriveLimitRefusal {
+  code: DriveLimitCode;
+  status?: number;
+  /** The limit: `project_bytes`, `account_bytes`, `file_bytes`, `request_bytes`, `sub_path_bytes`, `volume_bytes`, `transfer_bytes`. */
+  limit?: string;
+  max?: number;
+  used?: number;
+  requested?: number;
+  /** The folder a `sub_path_too_large` is about. */
+  path?: string;
+  /** The server's sentence for people. */
+  message: string;
+}
+
+const LIMIT_CODES: ReadonlySet<string> = new Set(DRIVE_LIMIT_CODES);
+
+/**
+ * The limit refusal an error carries, or `null` when it is not one. Reads the
+ * `code` off an {@link ApiError} (or any error with one) and the numbers off
+ * its response body. A number the server did not send is left out.
+ */
+export function driveLimitRefusal(error: unknown): DriveLimitRefusal | null {
+  if (!error || typeof error !== 'object') return null;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== 'string' || !LIMIT_CODES.has(code)) return null;
+  const e = error as { status?: unknown; message?: unknown; details?: unknown; data?: unknown };
+  const raw = e.details ?? e.data;
+  const body = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const num = (key: string) => (typeof body[key] === 'number' && Number.isFinite(body[key]) ? { [key]: body[key] as number } : {});
+  return {
+    code: code as DriveLimitCode,
+    ...(typeof e.status === 'number' ? { status: e.status } : {}),
+    ...(typeof body.limit === 'string' ? { limit: body.limit } : {}),
+    ...(typeof body.path === 'string' ? { path: body.path } : {}),
+    ...num('max'),
+    ...num('used'),
+    ...num('requested'),
+    message: typeof e.message === 'string' ? e.message : '',
+  };
+}
+
+export interface DriveEntry {
+  path: string;
+  name: string;
+  type: 'file' | 'dir' | 'symlink';
+  size: number;
+  mtime: number;
+  /** What the caller may do with this entry. */
+  access: FolderAccess;
+  /** The folder has sharing of its own. */
+  shared?: boolean;
+}
+
+export interface DriveVersion {
+  id: string;
+  createdAt: string;
+  /** `created` (the empty drive), `edit` (a change made in Files), `sync` (changes from a session), `restore`. */
+  kind: 'created' | 'edit' | 'sync' | 'restore';
+  author: 'drive' | 'session' | 'system';
+  changes: { changed: number; deleted: number };
+}
+
+/** One grant on a folder, or on a folder above it (`inherited`). */
+export interface FolderGrant {
+  grantId: string;
+  path: string;
+  inherited: boolean;
+  /** Made by Kortix: a person's own folder, the default for Company. */
+  system: boolean;
+  principalType: FolderPrincipalType;
+  principalId: string;
+  label: string;
+  level: FolderLevel;
+}
+
+export interface FolderAccessView {
+  path: string;
+  /** The caller's own access. */
+  access: FolderAccess;
+  /** The folder can be shared (not the top of Files, not /Users). */
+  grantable: boolean;
+  grants: FolderGrant[];
+}
+
+/** One folder a new session of an agent mounts (`listAgentMounts`). */
+export interface AgentMount {
+  /** The Files folder, e.g. `/Sales`. */
+  path: string;
+  /** Where a session sees it, e.g. `/drives/sales`. */
+  mountPath: string;
+  readOnly: boolean;
+  /** `agent`: a shared Drive added to the agent. `project`: only from an API older than 2026-11-03. */
+  via: 'agent' | 'project';
+  /** The agent's grant on the folder, to change or remove. */
+  grantId?: string;
+  level: FolderLevel;
+}
+
+export interface AgentMountPlan {
+  mounts: AgentMount[];
+  /** Folders past the sandbox's mount slots, in the order they were left out. */
+  skipped: string[];
+  slots: number;
+}
+
+export interface FolderPrincipals {
+  people: Array<{ id: string; label: string }>;
+  teams: Array<{ id: string; label: string }>;
+  /** `id` is the agent's name. */
+  agents: Array<{ id: string; label: string }>;
+}
+
+/** A "(conflict ...)" copy kept beside `originalPath` when two writers changed it at once. */
+export interface DriveConflict {
+  conflictId: string;
+  path: string;
+  originalPath: string;
+  detectedAt: string;
+}
+
+export interface SessionDrive {
+  driveId: string;
+  /** The folder, for people: "Company", "Users / ana". */
+  name: string;
+  kind: 'project';
+  mountPath: string;
+  readOnly: boolean;
+  /** The folder of the drive this mount is. */
+  subdir: string;
+  /** `me`: the session owner's own folder, their desktop. */
+  role?: 'me' | 'drive';
+  openConflicts?: number;
+  /**
+   * When the newest of `openConflicts` was detected (ISO 8601), null with none.
+   * Absent from an API older than 2026-11-04.
+   */
+  latestConflictAt?: string | null;
+}
+
+export interface SessionDrives {
+  drives: SessionDrive[];
+  /** The session is its owner's own (private, started by them): their folder mounts in it. */
+  personal: boolean;
+  /**
+   * Folders the session should have that its sandbox does not mount. `reason`:
+   * absent = past its mount slots; `region` / `moving` = the files live, or
+   * were moving, elsewhere; `unavailable` = storage refused the mount when the
+   * sandbox started, and it mounts as soon as storage can; `too_large` = the
+   * folder is larger than a folder mount allows. `detail` is storage's reason.
+   */
+  skipped?: Array<{
+    driveId: string;
+    name: string;
+    reason?: 'region' | 'moving' | 'unavailable' | 'too_large';
+    detail?: string;
+    /** For `too_large`: what the folder holds, and the largest folder a session mounts. */
+    bytes?: number;
+    maxBytes?: number;
+  }>;
+  /** What to tell people about `skipped`, or null when every folder fit. */
+  skippedMessage?: string | null;
+}
+
+const drivePath = (driveId: string) => `/drives/${encodeURIComponent(driveId)}`;
+
+/** The project's Files. Creates the drive and the caller's own folder on first use. */
+export async function getWorkspaceDrive(projectId: string): Promise<Drive> {
+  const drives = unwrap(
+    await backendApi.get<{ drives: Drive[] }>(`/drives?${new URLSearchParams({ projectId })}`),
+    'Failed to load files',
+  ).drives;
+  if (!drives[0]) throw new ApiError('Files not found', { status: 404 });
+  return drives[0];
+}
+
+/** @deprecated Use `getWorkspaceDrive`. Kept permanently. */
+export const getProjectDrive = getWorkspaceDrive;
+
+/**
+ * Who has access to a folder: its own grants and the ones it inherits. A
+ * refusal is the caller's to show (a badge simply stays empty), so it raises
+ * no app-wide error.
+ */
+export async function getFolderAccess(driveId: string, path: string): Promise<FolderAccessView> {
+  return unwrap(
+    await backendApi.get<FolderAccessView>(`${drivePath(driveId)}/access?${new URLSearchParams({ path })}`, {
+      showErrors: false,
+    }),
+    'Failed to load sharing',
+  );
+}
+
+/** One project admin's opens of a person's own folder on one UTC day. */
+export interface DriveAdminRead {
+  adminUserId: string;
+  /** The admin's name or email, as the folder's sharing shows people. */
+  label: string;
+  /** `YYYY-MM-DD`, UTC. */
+  day: string;
+  firstAt: string;
+  lastAt: string;
+  opens: number;
+}
+
+/** Who opened a person's own folder as a project admin: `folder` is null for a path in no one's own folder. */
+export interface DriveAdminReads {
+  folder: string | null;
+  reads: DriveAdminRead[];
+}
+
+/**
+ * The project admins who opened the person's own folder that holds `path`
+ * (`/Users/<name>`), per day, over the last 90 days, newest first. Project
+ * admins may open every person's own folder; each open is recorded. Only the
+ * folder's owner and the project's admins may read it.
+ */
+export async function getDriveAdminReads(driveId: string, path: string): Promise<DriveAdminReads> {
+  return unwrap(
+    await backendApi.get<DriveAdminReads>(`${drivePath(driveId)}/admin-reads?${new URLSearchParams({ path })}`, {
+      showErrors: false,
+    }),
+    'Failed to load admin opens',
+  );
+}
+
+/**
+ * The Files folders a new session of an agent mounts, where, and read-only
+ * or not: the folders shared with the agent and with everyone in the
+ * project, planned the way a session boots. A person's own folders join the
+ * sessions they start and are not listed.
+ */
+export async function listAgentMounts(driveId: string, agentName: string): Promise<AgentMountPlan> {
+  return unwrap(
+    await backendApi.get<AgentMountPlan>(`${drivePath(driveId)}/agents/${encodeURIComponent(agentName)}/mounts`),
+    'Failed to load mounts',
+  );
+}
+
+/**
+ * @deprecated Always empty since 2026-11-03: nothing mounts in every session
+ * of the project. Read an agent's plan with {@link listAgentMounts}.
+ */
+export async function listProjectMounts(driveId: string): Promise<AgentMountPlan> {
+  return unwrap(await backendApi.get<AgentMountPlan>(`${drivePath(driveId)}/mounts`), 'Failed to load mounts');
+}
+
+/**
+ * Share a folder: a person (user id), a team (group id), an agent (its name)
+ * or everyone in the project. Sharing again changes the level.
+ */
+export async function shareFolder(
+  driveId: string,
+  input: { path: string; principalType: FolderPrincipalType; principalId?: string; level: FolderLevel },
+): Promise<{ grantId: string; pendingSessions?: number }> {
+  return unwrap(
+    await backendApi.put<{ grantId: string; pendingSessions?: number }>(`${drivePath(driveId)}/access`, input),
+    'Failed to share folder',
+  );
+}
+
+/**
+ * Stop sharing a folder. `pendingSessions`: running sessions that still mount
+ * it because their detach has not landed yet. The API keeps retrying those and
+ * refuses their access to it meanwhile; 0 means every session is in line.
+ */
+export async function unshareFolder(driveId: string, grantId: string): Promise<{ pendingSessions: number }> {
+  const res = unwrap(
+    await backendApi.delete<{ pendingSessions?: number } | null>(`${drivePath(driveId)}/access/${encodeURIComponent(grantId)}`),
+    'Failed to stop sharing',
+  );
+  return { pendingSessions: typeof res?.pendingSessions === 'number' ? res.pendingSessions : 0 };
+}
+
+/** People, teams and agents a folder can be shared with. */
+export async function listFolderPrincipals(driveId: string): Promise<FolderPrincipals> {
+  return unwrap(await backendApi.get<FolderPrincipals>(`${drivePath(driveId)}/principals`), 'Failed to load people');
+}
+
+/** Conflict copies on the drive that are still open. */
+export async function listDriveConflicts(driveId: string): Promise<DriveConflict[]> {
+  return unwrap(
+    await backendApi.get<{ conflicts: DriveConflict[] }>(`${drivePath(driveId)}/conflicts`),
+    'Failed to load conflicts',
+  ).conflicts;
+}
+
+/** Hide a conflict notice. The copy stays on the drive. */
+export async function dismissDriveConflict(driveId: string, conflictId: string): Promise<void> {
+  unwrap(
+    await backendApi.post(`${drivePath(driveId)}/conflicts/${encodeURIComponent(conflictId)}/dismiss`, {}),
+    'Failed to dismiss conflict',
+  );
+}
+
+/** One folder's entries (not recursive): only what the caller may see, each with the caller's access. */
+export async function listDriveFiles(driveId: string, path = '/'): Promise<DriveEntry[]> {
+  return (await listDriveFolder(driveId, path)).entries;
+}
+
+/**
+ * One folder's entries and the caller's access to the folder itself. A failure
+ * is the caller's to show (an error state, or a step up when the folder is
+ * gone), so it raises no app-wide error: a folder listed a moment before it
+ * exists answers 404 and is no user-facing error.
+ */
+export async function listDriveFolder(driveId: string, path = '/'): Promise<{ entries: DriveEntry[]; access: FolderAccess }> {
+  return unwrap(
+    await backendApi.get<{ entries: DriveEntry[]; access: FolderAccess }>(
+      `${drivePath(driveId)}/files?${new URLSearchParams({ path })}`,
+      { showErrors: false },
+    ),
+    'Failed to load files',
+  );
+}
+
+/**
+ * The URL of a file's bytes. It needs the caller's bearer token, so a browser
+ * link cannot open it directly: use {@link downloadDriveFile} for that.
+ */
+export function getDriveFileUrl(driveId: string, path: string, options?: { download?: boolean }): string {
+  const base = stripTrailingSlashes(platformConfig().backendUrl);
+  const query: Record<string, string> = { path };
+  if (options?.download) query.download = '1';
+  return `${base}${drivePath(driveId)}/files/content?${new URLSearchParams(query)}`;
+}
+
+export async function downloadDriveFile(driveId: string, path: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await authenticatedFetch(getDriveFileUrl(driveId, path), { signal });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { message?: string } | null;
+    throw new ApiError(body?.message || 'Could not download file', { status: response.status });
+  }
+  return response.blob();
+}
+
+/** A file's bytes and the version they are (the ETag), for a later conditional save. */
+export async function readDriveFile(
+  driveId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; version: string | null }> {
+  const response = await authenticatedFetch(getDriveFileUrl(driveId, path), { signal });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { message?: string } | null;
+    throw new ApiError(body?.message || 'Could not download file', { status: response.status });
+  }
+  return { blob: await response.blob(), version: response.headers.get('etag') };
+}
+
+type DriveUploadResult = { path: string; size: number; version?: string };
+
+/** The XMLHttpRequest members an upload with progress uses. Browsers and React Native provide them. */
+interface ProgressRequest {
+  upload: { onprogress: ((event: { loaded: number }) => void) | null };
+  onload: (() => void) | null;
+  onerror: (() => void) | null;
+  onabort: (() => void) | null;
+  status: number;
+  responseText: string;
+  open(method: string, url: string): void;
+  setRequestHeader(name: string, value: string): void;
+  send(body: Blob): void;
+  abort(): void;
+}
+
+/**
+ * Write a file, replacing any file at `path`. With `ifMatch` (the version it
+ * was read at), a file someone changed since is refused with 409
+ * `file_changed` instead of being overwritten.
+ *
+ * Up to 64 MiB the body goes up in one request. A larger body goes up in
+ * 1 MiB blocks (the block upload): the server answers which blocks storage
+ * lacks, only those travel, 4 at a time, each retried on a transient failure,
+ * and the commit lands the whole file at once. A `Blob` is read one block at
+ * a time (a browser `File` or a Bun file never sits in memory whole). It
+ * needs `crypto.subtle` to hash the blocks.
+ *
+ * A one-request body that fails transiently (408, 429, 5xx, a timeout or a
+ * dropped connection; never an abort) is sent again after 0.5, 1, 2, 4 and
+ * 8 s: at most 6 tries, 15.5 s of waits. With `ifMatch` only a 429 is sent
+ * again: a timed-out conditional write may have landed. On the `fetch` path
+ * (no `onProgress`) only the final failure reaches the app-wide `onError`;
+ * the `XMLHttpRequest` and block paths leave every failure to the caller. A
+ * caller adds no retry of its own.
+ *
+ * `onProgress(sentBytes, totalBytes)` reports the body going up. A resend
+ * reports from 0 again. `fetch` has
+ * no upload progress, so with it a one-request body goes over
+ * `XMLHttpRequest` (same auth and headers); a host without one uses `fetch`
+ * and reports completion. The block upload reports each block.
+ */
+export async function uploadDriveFile(
+  driveId: string,
+  path: string,
+  body: Blob | ArrayBuffer | Uint8Array<ArrayBuffer>,
+  options?: {
+    signal?: AbortSignal;
+    ifMatch?: string | null;
+    onProgress?: (sentBytes: number, totalBytes: number) => void;
+  },
+): Promise<DriveUploadResult> {
+  const endpoint = `${drivePath(driveId)}/files/content?${new URLSearchParams({ path })}`;
+  const headers: Record<string, string> = options?.ifMatch ? { 'If-Match': options.ifMatch } : {};
+  const onProgress = options?.onProgress;
+  if ((body instanceof Blob ? body.size : body.byteLength) > SINGLE_UPLOAD_MAX_BYTES) {
+    return uploadInBlocks(driveId, path, body instanceof Blob ? body : new Blob([body]), headers, options);
+  }
+  // A transient failure is sent again: a plain PUT overwrites, so a resend of
+  // one that landed is harmless. A conditional one (If-Match) that may have
+  // landed would refuse its own resend, so only its 429 (never ran) is resent.
+  const retry = { signal: options?.signal, onlyRefused: !!options?.ifMatch };
+  const Xhr = (globalThis as { XMLHttpRequest?: new () => ProgressRequest }).XMLHttpRequest;
+  if (onProgress && Xhr) {
+    const blob = body instanceof Blob ? body : new Blob([body]);
+    return retryTransient(() => uploadWithProgress(Xhr, endpoint, blob, headers, onProgress, options?.signal), retry);
+  }
+  let result: DriveUploadResult;
+  try {
+    // Each attempt is quiet: only the final outcome reaches the app-wide handler.
+    result = await withRetries(
+      () => backendApi.putRaw<DriveUploadResult>(endpoint, body, { signal: options?.signal, headers, showErrors: false }),
+      'Failed to upload file',
+      retry,
+    );
+  } catch (error) {
+    if (error instanceof ApiError && isReportedWriteFailure(error)) platformConfig().onError?.(error);
+    throw error;
+  }
+  const size = body instanceof Blob ? body.size : body.byteLength;
+  onProgress?.(size, size);
+  return result;
+}
+
+/** The API takes one request body up to this size; a larger file goes up in blocks. */
+const SINGLE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024;
+const UPLOAD_BLOCK_BYTES = 1024 * 1024;
+const UPLOAD_BLOCK_CONCURRENCY = 4;
+/** Waits before each retry of a transient failure: 15.5 s in all. */
+const UPLOAD_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000];
+const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+type ApiResult<T> = { success: boolean; data?: T; error?: Error };
+
+/** A network failure, a timeout or a 408/429/5xx: worth sending again. Never an abort. */
+function isTransient(error: Error | undefined): boolean {
+  const e = error as ApiError | undefined;
+  if (!e || e.code === 'ABORTED' || e.name === 'AbortError') return false;
+  if (e.code === 'TIMEOUT') return true;
+  return e.status === undefined ? e.code !== 'NO_SESSION' : TRANSIENT_STATUSES.has(e.status);
+}
+
+/**
+ * `send` again after each wait in `UPLOAD_RETRY_DELAYS_MS` while it fails
+ * transiently. `onlyRefused`: resend only a 429, which never ran (a
+ * conditional write that timed out may have landed). An abort during a wait
+ * stops at once.
+ */
+async function retryTransient<T>(
+  send: () => Promise<T>,
+  options: { signal?: AbortSignal; onlyRefused?: boolean } = {},
+): Promise<T> {
+  const { signal, onlyRefused } = options;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await send();
+    } catch (error) {
+      const delay = UPLOAD_RETRY_DELAYS_MS[attempt];
+      const retry = onlyRefused ? (error as ApiError).status === 429 : isTransient(error as Error);
+      if (delay === undefined || !retry) throw error;
+      await abortableDelay(delay, signal).catch(() => {
+        throw new ApiError('Request aborted', { name: 'AbortError', code: 'ABORTED' });
+      });
+    }
+  }
+}
+
+function withRetries<T>(
+  send: () => Promise<ApiResult<T>>,
+  fallbackMessage: string,
+  options?: { signal?: AbortSignal; onlyRefused?: boolean },
+): Promise<T> {
+  return retryTransient(async () => unwrap(await send(), fallbackMessage), options);
+}
+
+const toHex = (digest: ArrayBuffer) => Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+
+async function uploadInBlocks(
+  driveId: string,
+  path: string,
+  file: Blob,
+  headers: Record<string, string>,
+  options: { signal?: AbortSignal; onProgress?: (sentBytes: number, totalBytes: number) => void } | undefined,
+): Promise<DriveUploadResult> {
+  const signal = options?.signal;
+  const aborted = () => new ApiError('Request aborted', { name: 'AbortError', code: 'ABORTED' });
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new ApiError('This runtime cannot upload files larger than 64 MiB: it has no crypto.subtle', { code: 'UNSUPPORTED' });
+  const blockAt = (i: number) => file.slice(i * UPLOAD_BLOCK_BYTES, Math.min(file.size, (i + 1) * UPLOAD_BLOCK_BYTES));
+  const blocks: string[] = [];
+  for (let i = 0; i * UPLOAD_BLOCK_BYTES < file.size; i++) {
+    if (signal?.aborted) throw aborted();
+    blocks.push(toHex(await subtle.digest('SHA-256', await blockAt(i).arrayBuffer())));
+  }
+  const base = `${drivePath(driveId)}/files/upload`;
+  const plan = await withRetries(
+    () => backendApi.post<{ uploadId: string; missing: string[] }>(base, { path, size: file.size, blocks }, { signal, headers, showErrors: false, timeout: 5 * 60_000 }),
+    'Failed to upload file',
+  );
+  const firstIndex = new Map<string, number>();
+  blocks.forEach((sha, i) => firstIndex.has(sha) || firstIndex.set(sha, i));
+  const missing = [...new Set(plan.missing)];
+  let sent = file.size - missing.reduce((n, sha) => n + blockAt(firstIndex.get(sha) ?? 0).size, 0);
+  options?.onProgress?.(sent, file.size);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < missing.length) {
+      if (signal?.aborted) throw aborted();
+      const sha = missing[next++]!;
+      const index = firstIndex.get(sha);
+      if (index === undefined) throw new ApiError('The server asked for a block this file does not have', { code: 'UPLOAD_PLAN_MISMATCH' });
+      // Bytes, not the Blob slice: Bun cannot send a slice of a file-backed Blob (the socket closes).
+      const block = new Uint8Array(await blockAt(index).arrayBuffer());
+      await withRetries(
+        () => backendApi.putRaw(`${base}/${encodeURIComponent(plan.uploadId)}/blocks/${sha}`, block, { signal, showErrors: false }),
+        'Failed to upload file',
+      );
+      sent += block.byteLength;
+      options?.onProgress?.(sent, file.size);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(UPLOAD_BLOCK_CONCURRENCY, missing.length) }, () =>
+      worker().catch((err: unknown) => {
+        failed = true;
+        throw err;
+      }),
+    ),
+  );
+  if (signal?.aborted) throw aborted();
+  // The commit is safe to send again: a commit that landed answers the same.
+  return withRetries(
+    () => backendApi.post<DriveUploadResult>(`${base}/${encodeURIComponent(plan.uploadId)}/commit`, undefined, { signal, showErrors: false, timeout: 10 * 60_000 }),
+    'Failed to upload file',
+  );
+}
+
+async function uploadWithProgress(
+  Xhr: new () => ProgressRequest,
+  endpoint: string,
+  blob: Blob,
+  extraHeaders: Record<string, string>,
+  onProgress: (sentBytes: number, totalBytes: number) => void,
+  signal: AbortSignal | undefined,
+): Promise<DriveUploadResult> {
+  const url = `${stripTrailingSlashes(platformConfig().backendUrl)}${endpoint}`;
+  const { headers, rejected } = await platformRequestHeaders(url, {
+    'Content-Type': 'application/octet-stream',
+    ...extraHeaders,
+  });
+  return new Promise((resolve, reject) => {
+    const xhr = new Xhr();
+    const aborted = () => new ApiError('Request aborted', { name: 'AbortError', code: 'ABORTED' });
+    if (signal?.aborted) return reject(aborted());
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const done = () => signal?.removeEventListener('abort', onAbort);
+    xhr.open('PUT', url);
+    headers.forEach((value, name) => xhr.setRequestHeader(name, value));
+    xhr.upload.onprogress = (event) => onProgress(event.loaded, blob.size);
+    xhr.onload = () => {
+      done();
+      let parsed: { message?: string; code?: string } | null = null;
+      try {
+        parsed = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        parsed = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(parsed as DriveUploadResult);
+      if (xhr.status === 401) rejected();
+      reject(
+        new ApiError(parsed?.message || 'Failed to upload file', {
+          status: xhr.status,
+          code: parsed?.code,
+          url,
+          // The body, as `fetch` errors carry it: a limit refusal's numbers (driveLimitRefusal).
+          ...(parsed ? { details: parsed } : {}),
+        }),
+      );
+    };
+    xhr.onerror = () => {
+      done();
+      reject(new ApiError('Network error while uploading', { name: 'TypeError', url }));
+    };
+    xhr.onabort = () => {
+      done();
+      reject(aborted());
+    };
+    xhr.send(blob);
+  });
+}
+
+/**
+ * Make a folder. A transient failure is sent again, as `uploadDriveFile`
+ * does (at most 6 tries); a folder that exists answers 409. Folder writes
+ * (mkdir, move, delete) raise no app-wide error: every caller shows its own
+ * outcome, and the app-wide toast would say it a second time.
+ */
+export async function makeDriveFolder(driveId: string, path: string): Promise<{ path: string }> {
+  return withRetries(
+    () => backendApi.post<{ path: string }>(`${drivePath(driveId)}/files/mkdir`, { path }, { showErrors: false }),
+    'Failed to create folder',
+  );
+}
+
+/** Move or rename. An existing destination is refused (409). */
+export async function moveDriveFile(driveId: string, from: string, to: string): Promise<{ from: string; to: string }> {
+  return unwrap(
+    await backendApi.post<{ from: string; to: string }>(`${drivePath(driveId)}/files/move`, { from, to }, { showErrors: false }),
+    'Failed to move',
+  );
+}
+
+export async function deleteDriveFile(driveId: string, path: string, options?: { recursive?: boolean }): Promise<void> {
+  const query: Record<string, string> = { path };
+  if (options?.recursive) query.recursive = 'true';
+  unwrap(
+    await backendApi.delete(`${drivePath(driveId)}/files?${new URLSearchParams(query)}`, { showErrors: false }),
+    'Failed to delete',
+  );
+}
+
+/** Newest first. */
+export async function listDriveVersions(driveId: string): Promise<DriveVersion[]> {
+  return unwrap(
+    await backendApi.get<{ versions: DriveVersion[] }>(`${drivePath(driveId)}/versions`),
+    'Failed to load versions',
+  ).versions;
+}
+
+/** Make the drive's files equal a version's (project admins). Later versions stay in the history. */
+export async function restoreDriveVersion(driveId: string, versionId: string): Promise<void> {
+  unwrap(await backendApi.post(`${drivePath(driveId)}/restore`, { versionId }), 'Failed to restore version');
+}
+
+const sessionDrivesPath = (projectId: string, sessionId: string) =>
+  `/workspaces/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/drives`;
+
+/** What the project's Files hold, their limits, and each folder sessions mount against the folder-mount cap. */
+export async function getDriveUsage(driveId: string): Promise<DriveUsage> {
+  return unwrap(await backendApi.get<DriveUsage>(`${drivePath(driveId)}/usage`, { showErrors: false }), 'Failed to load storage');
+}
+
+/**
+ * What an account's Files hold, per project, against the plan's limits. Needs
+ * `billing.read` on the account; without `accountId`, the caller's own.
+ */
+export async function getAccountStorageUsage(accountId?: string): Promise<AccountStorageUsage> {
+  const query = accountId ? `?${new URLSearchParams({ account_id: accountId })}` : '';
+  return unwrap(await backendApi.get<AccountStorageUsage>(`/drives/usage${query}`, { showErrors: false }), 'Failed to load storage');
+}
+
+/** The folders the session's current sandbox mounts, and where. */
+export async function listSessionDrives(projectId: string, sessionId: string): Promise<SessionDrive[]> {
+  return (await getSessionDrives(projectId, sessionId)).drives;
+}
+
+/** The session's folders, and whether it is its owner's own session. */
+export async function getSessionDrives(projectId: string, sessionId: string): Promise<SessionDrives> {
+  return unwrap(await backendApi.get<SessionDrives>(sessionDrivesPath(projectId, sessionId)), 'Failed to load session files');
+}

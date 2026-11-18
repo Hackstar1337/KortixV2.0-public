@@ -1,0 +1,146 @@
+import { isProjectSessionPrincipal } from '../../iam/agent-scope';
+import { buildDenialError } from '../../iam/denial-message';
+import { createRoute, z } from '@hono/zod-openapi';
+import { auth, errors, json } from '../../openapi';
+import { PROJECT_ACTIONS } from '../../iam/actions';
+import { loadProjectForUser, projectCapabilityAllowed } from '../lib/access';
+import { projectsApp } from '../lib/app';
+import {
+  createGatewayKey,
+  listGatewayKeys,
+  revokeGatewayKey,
+} from '../../llm-gateway/gateway-keys';
+import { publicGatewayBaseUrl } from '../../llm-gateway/public-url';
+import { config } from '../../config';
+import { workspaceIdParam } from '../../shared/route-params';
+
+export function registerGatewayKeysRoutes(): void {
+  projectsApp.openapi(
+    createRoute({
+      method: 'get',
+      path: '/{workspaceId}/gateway/keys',
+      tags: ['gateway'],
+      summary: 'List project LLM gateway API keys',
+      ...auth,
+      request: { params: z.object({ workspaceId: z.string() }) },
+      responses: { 200: json(z.any(), 'Gateway API keys'), ...errors(403, 404) },
+    }),
+    async (c: any) => {
+      // Same escalation guard as project-credentials: a durable `kgw_` key minted
+      // or revoked by an agent session outlives the session and carries no grant.
+      if (isProjectSessionPrincipal(c)) throw buildDenialError(PROJECT_ACTIONS.PROJECT_GATEWAY_KEYS_MANAGE, 'agent_human_only_action');
+      const projectId = workspaceIdParam(c);
+      const loaded = await loadProjectForUser(c, projectId, 'read');
+      if (!loaded) return c.json({ error: 'Not found' }, 404);
+      if (!(await projectCapabilityAllowed(
+        c,
+        loaded.userId,
+        loaded.row.accountId,
+        projectId,
+        PROJECT_ACTIONS.PROJECT_GATEWAY_KEYS_MANAGE,
+      ))) {
+        return c.json({ error: 'You do not have permission to manage gateway keys' }, 403);
+      }
+      const keys = await listGatewayKeys(projectId);
+      return c.json({
+        // Env-correct public host (dev vs prod) so the UI's curl example points at
+        // the right gateway instead of a hardcoded one.
+        gateway_url: publicGatewayBaseUrl(config.LLM_GATEWAY_BASE_URL),
+        keys: keys.map((k) => ({
+          key_id: k.keyId,
+          name: k.name,
+          key_prefix: k.keyPrefix,
+          status: k.status,
+          last_used_at: k.lastUsedAt,
+          created_at: k.createdAt,
+        })),
+      });
+    },
+  );
+
+  projectsApp.openapi(
+    createRoute({
+      method: 'post',
+      path: '/{workspaceId}/gateway/keys',
+      tags: ['gateway'],
+      summary: 'Create a project LLM gateway API key',
+      ...auth,
+      request: {
+        params: z.object({ workspaceId: z.string() }),
+        body: {
+          content: {
+            'application/json': { schema: z.object({ name: z.string().min(1).max(255) }) },
+          },
+        },
+      },
+      responses: { 200: json(z.any(), 'Gateway API key created'), ...errors(400, 403, 404) },
+    }),
+    async (c: any) => {
+      // A connected app's revocable `kortix_oat_` token must not mint a durable one.
+      if (c.get('authType') === 'oauth') return c.json({ error: 'Connected apps cannot mint gateway keys.' }, 403);
+      // Same escalation guard as project-credentials: a durable `kgw_` key minted
+      // or revoked by an agent session outlives the session and carries no grant.
+      if (isProjectSessionPrincipal(c)) throw buildDenialError(PROJECT_ACTIONS.PROJECT_GATEWAY_KEYS_MANAGE, 'agent_human_only_action');
+      const projectId = workspaceIdParam(c);
+      const loaded = await loadProjectForUser(c, projectId, 'read');
+      if (!loaded) return c.json({ error: 'Not found' }, 404);
+      if (!(await projectCapabilityAllowed(
+        c,
+        loaded.userId,
+        loaded.row.accountId,
+        projectId,
+        PROJECT_ACTIONS.PROJECT_GATEWAY_KEYS_MANAGE,
+      ))) {
+        return c.json({ error: 'You do not have permission to manage gateway keys' }, 403);
+      }
+      const body = await c.req.json();
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name) return c.json({ error: 'A key name is required' }, 400);
+      const created = await createGatewayKey({
+        accountId: loaded.row.accountId,
+        projectId,
+        name,
+        createdBy: c.get('userId'),
+      });
+      return c.json({
+        ...created,
+        // Same env-correct host as the GET: a freshly minted key is shown with
+        // the URL to use it against, so `keys new` can state the endpoint
+        // without a second round-trip (KRTX-1750).
+        gateway_url: publicGatewayBaseUrl(config.LLM_GATEWAY_BASE_URL),
+      });
+    },
+  );
+
+  projectsApp.openapi(
+    createRoute({
+      method: 'delete',
+      path: '/{workspaceId}/gateway/keys/{keyId}',
+      tags: ['gateway'],
+      summary: 'Revoke a project LLM gateway API key',
+      ...auth,
+      request: {
+        params: z.object({ workspaceId: z.string(), keyId: z.string().uuid() }),
+      },
+      responses: { 200: json(z.any(), 'Gateway API key revoked'), ...errors(403, 404) },
+    }),
+    async (c: any) => {
+      if (isProjectSessionPrincipal(c)) throw buildDenialError(PROJECT_ACTIONS.PROJECT_GATEWAY_KEYS_MANAGE, 'agent_human_only_action');
+      const projectId = workspaceIdParam(c);
+      const keyId = c.req.param('keyId');
+      const loaded = await loadProjectForUser(c, projectId, 'read');
+      if (!loaded) return c.json({ error: 'Not found' }, 404);
+      if (!(await projectCapabilityAllowed(
+        c,
+        loaded.userId,
+        loaded.row.accountId,
+        projectId,
+        PROJECT_ACTIONS.PROJECT_GATEWAY_KEYS_MANAGE,
+      ))) {
+        return c.json({ error: 'You do not have permission to manage gateway keys' }, 403);
+      }
+      const ok = await revokeGatewayKey(projectId, keyId);
+      return c.json({ ok });
+    },
+  );
+}

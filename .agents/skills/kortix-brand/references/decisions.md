@@ -1,0 +1,974 @@
+# Decisions
+
+The history of the Kortix brand. Newest first. Append only: to reverse a decision, add a new entry that names the old one under "Supersedes". Never edit an old entry to change its meaning.
+
+Each entry has six fields: **Date** (ISO, the day the decision was recorded or made), **Decision**, **Why**, **Where** (the files that carry it), **Supersedes**, **Source** (PR or commit). The id in the heading is how other files cite the entry. An entry with status OPEN has no answer. Do not invent one: follow the "When silent" line of the rule that cites it.
+
+How to add an entry: change the value in `visual/visual-system.json`, run `scripts/generate-tokens.ts`, update the guidance file, then write the entry here, at the top of its date group. Do not put a color literal in this file: write the token name. `tests/unit/brand-kit.test.ts` fails on a literal. A value that was removed is written in code font, which the test skips.
+
+Ids: `D1` to `D8` and `D4a` to `D4k` come from the 2026-10-01 brand-kit build. `J-1` to `J-9` also live in `visual-system.json` (`decisions`). `K1` and up are kit-build decisions. `D9` comes from the OpenCode decoupling plan (2026-10-02); D39 answers it. `E1` and `E2` are errata moved from the old skills. `Q1` and up come from fresh-agent QA rounds (Q1 to Q21 round 1, Q22 to Q32 round 2, Q33 to Q45 the full judge input and the surface agents, Q46 to Q57 the final kit pass on round 3).
+
+---
+
+## 2026-11-09
+
+### D42 The home hero has no trait line: title, then subhead
+- **Date:** 2026-11-09
+- **Decision:** The home hero renders no trait block above the title. It is the nav, then the title "The CompanyOS" (D35), then the subhead (D37), then the CTAs and the session-window band. No carousel, badges or replacement line goes in the freed space.
+- **Why:** two teammates in #kortix-triage, 2026-11-09: the two-by-two icon-and-label line ("Open Source, Extensible, Multiplayer, Sovereign", D35) reads as clutter and eats about a quarter of a phone's first screen; the follow-up ask was to remove the section outright, with no substitute.
+- **Where:** `apps/web/src/features/marketing/landing-hero/sand-band-hero.tsx`. The trait words stay in [positioning.md](verbal/positioning.md) "The three lengths" (the Short line), which the hero no longer spells out.
+- **Supersedes:** the trait-line part of D35 (D35's subhead part was already superseded by D37; the title and the positioning line stand).
+- **Source:** KRTX-4560 (the `krtx-4560-remove-hero-traits` branch).
+
+## 2026-11-06
+
+### D41 One workspace role, one Settings panel, and the workspace code names
+- **Date:** 2026-11-06
+- **Decision:** (1) A person holds ONE role per workspace, read from one ladder: Owner, Admin, Manager, Member. The UI never shows "account owner", "account admin", "account member", "project member" or "project manager", and never a second "access role" beside the workspace role. An invite reads "Invite people to {workspace}" and carries one role (Owner only by a transfer). (2) "Workspace settings" is the workspace's one Settings panel (`/workspaces/<id>/admin/<section>`, rail Workspace · Library · People · Billing · Support). "Preferences" is the person's own settings (profile, security, appearance, notifications, personal keys); the menu row that opens it says "Preferences" and keeps Mod+,. No surface has two rows labelled "Settings". (3) The code now has workspace names (`/v1/workspaces`, `workspace_id`, `kortix workspaces`, `KORTIX_WORKSPACE_ID`): copy that cites a code name uses the workspace name; the project and account names stay valid aliases and appear only where the reader's tool still prints them. (4) A key the workspace mints says "This workspace"; a personal key says "Every workspace". Never "Whole workspace" for a key that reaches more than one.
+- **Why:** founder, 2026-11-05 and 2026-11-06: "there will just be Workspace scopes not the account level or project level shit, just 1 type", "Hardcore treat everything 100% like SLACK Workspace", "1 Settings panel with all from top to bottom things". The review of the `workspaces` branch (findings 19 to 21) found the invite dialog still offering "Account member" plus an optional "Project member" row, two rows labelled "Settings" with different meanings, and copy that called the viewer's email "Workspace".
+- **Where:** [voice-and-tone.md](verbal/voice-and-tone.md) (the workspace and role rows of the noun table, the code-name rule), `packages/ui/src/access/access/role-select.tsx`, `packages/ui/src/access/access/invite-people-dialog.tsx`, `packages/shared/src/workspace-settings.ts` (the section names), `apps/web/translations/*.json`, `.agents/skills/learnings/work/workspaces/ux.md` sections 3 and 4.
+- **Supersedes:** the two-level access sentence of D40 ("the owner, admin and member role is the 'workspace role', and the Manager, Editor and Viewer grant is the 'access role'"), and D39 rule (4) where it kept `project` code names in copy that now has a workspace name. The rest of D39 stands.
+- **Source:** the `workspaces` branch (sub-branch `ws-r1-web`).
+
+### D39 Copy never names OpenCode as the harness; it names pi only where the sentence needs the name
+- **Date:** 2026-11-06
+- **Decision:** D9 has an answer. Customer copy names no harness product: it writes "agents", "the agent harness" or "the agent runtime". It names pi only where the sentence needs the name (D20, D24 and D27 say where). It never names OpenCode as a harness. OpenCode Zen and OpenCode Go stay as model-provider names.
+- **Why:** D9's premise is gone. Every session runs pi inside the Kortix daemon. The daemon has had no OpenCode adapter since 2026-10-30: a box that OpenCode booted before then boots pi (`apps/kortix-sandbox-agent-server/src/harness/README.md`, section "OpenCode is deleted"). The `registeredHarnesses` list, the `pi_harness` flag and the `runtime:` choice that D9 cites no longer exist. D9's "Until answered" line (name OpenCode on marketing surfaces) contradicted the harness rule in `verbal/claims.md` (user decision, 2026-10-28). This entry records that rule as the answer.
+- **Where:** `verbal/claims.md` (the harness rule and the row "Harness"), `verbal/voice-and-tone.md` (the brand-name row "OpenCode", the product noun `kortix.yaml`), `verbal/concepts.md` (beat 1, move 4).
+- **Supersedes:** D9.
+- **Source:** the `opencode-removal` branch.
+
+## 2026-11-05
+
+### D38 The email footer sits on the left edge and links the mobile apps
+- **Date:** 2026-11-05
+- **Decision:** The email footer (tagline, social icons, app links) is left-aligned on the frame edge, the same edge as the header symbol and the card. The first social icon has no left padding, so it starts on that edge; the icons are 16 px apart. The last footer line links "iOS app" and "Android app" (`/download/ios`, `/download/android` on the deployment's own host); the `kortix.com` link is gone.
+- **Why:** founder, 2026-11-05: the logo, the body and the footer must share one alignment. A centered footer under a left-aligned header and card "looks a bit weird" and breaks the hierarchy. The same day the founder asked to replace `kortix.com` with download links for the iOS and Android apps.
+- **Where:** `apps/api/src/lib/email/template.tsx`.
+- **Supersedes:** the last sentence of D26 ("The footer is centered: tagline, social icons, `kortix.com`"). The rest of D26 stands.
+- **Source:** the `email-footer-left` branch.
+
+### D40 "Workspace" is the one container noun; "project", "account" and "organization" leave the copy
+- **Date:** 2026-11-05
+- **Decision:** A workspace is a company's place in Kortix: its people, agents, sessions, connectors, files and billing. One workspace = one company, each one independent, the Slack model. It is the only top-level noun in every surface: the web app, mobile, the CLI help, the docs and marketing. "Project", "account" (as the container) and "organization" (as the container) move to the Never column of the noun table in [voice-and-tone.md](verbal/voice-and-tone.md). The copy follows four rules: (1) "Slack workspace", "Teams tenant" and "GitHub organization" stay, always qualified; (2) "your Kortix account" stays for a person's sign-in identity only (sign in, profile, delete my account); (3) the session's machine is a "sandbox", never a "workspace"; (4) a code name stays exact and in mono (`kortix projects use`, `--project`, `KORTIX_PROJECT_ID`, `/v1/projects`, `project.gitops.merge`, ICU placeholder names such as `{project}`). In the two-level access copy, the owner, admin and member role is the "workspace role", and the Manager, Editor and Viewer grant is the "access role" ("workspace access"). Positioning keeps the repo: "A Kortix workspace is backed by a git repo, and that repo is the company."
+- **Why:** founder, 2026-11-05: "can we somehow rename projects into workspaces? ... unify one organization and one project just into one primitive called a workspace", then "'Project' disappears from the UI, CLI and docs ... Hardcore treat everything 100% like SLACK Workspace, each being independent & all is per Workspace". Users read "project" as a small unit of work and asked whether a new task needs a new project. The data already has the Slack shape: 95.3% of accounts that have a project have exactly one (prod aggregates, 2026-11-05). Before this entry, "workspace" meant four things in `apps/web/translations/en.json`: the account, the project, a Slack workspace and the sandbox.
+- **Where:** [voice-and-tone.md](verbal/voice-and-tone.md) (the noun table and the three rules after it), [claims.md](verbal/claims.md) (the price, secrets, channels and audience rows), [positioning.md](verbal/positioning.md), [concepts.md](verbal/concepts.md), `apps/web/translations/en.json`, `packages/ui/src/i18n/en.ts`, `apps/web/content/docs/`, `apps/web/src/i18n/workspace-vocabulary.test.ts` (the ratchet). The plan and the UX contract: `.agents/skills/learnings/work/workspaces/`.
+- **Supersedes:** the `project` and `account` rows of the product noun table, and the rule that wrote "project" exactly as the code names it.
+- **Source:** the `workspaces` branch (sub-branch `workspaces-ws-copy`).
+
+## 2026-11-02
+
+### D37 The home hero subhead merges the positioning line with "Hand it an outcome"
+- **Date:** 2026-11-02
+- **Decision:** The home hero subhead is: "The cloud-native agent harness for companies. Hand it an outcome and agents run it 24/7 on your tools and context. Open source, in our cloud or yours." The positioning line leads; the earlier hero line follows as its mechanism, cut to one sentence plus where it runs (the founder asked for it more concise the same day; a first merge ran to about 240 characters). The title ("The CompanyOS") and the four traits stay as D35 set them.
+- **Why:** founder, 2026-11-02: "improve the HERO text merge it with the og 'Hand it an outcome and AI agents run it 24/7…'". The D35 mechanism sentence ("Always-on agents that start on events, run in parallel and share one memory of your company") said the same thing in words buyers do not use.
+- **Where:** `apps/web/src/features/marketing/landing-hero/sand-band-hero.tsx`.
+- **Supersedes:** the subhead sentence of D35. The rest of D35 stands.
+- **Source:** the `case-studies` branch.
+
+### D36 Case-study cards show a drawn mark, never a firm name
+- **Date:** 2026-11-02
+- **Decision:** A case study that names only a class (a firm, not its name) may carry a mark that Kortix drew for that card: a symbol, sometimes with one or two invented letters, never a firm name, a real client's initials or a likeness of the firm's real logo. It sits on the white logo tile like a third-party logo, in its own colors, so the row reads as a row of logos. The AI-run asset manager is a pinwheel of four quarter-discs turning around the center (a diversified portfolio), deep navy and azure; it replaced two forward slashes on the founder's ask. The executive search firm is two discs, deep emerald (the firm) and a lighter green (the candidate), whose overlap is cut out where they meet (the match); it replaced two ink-blue rings on the founder's ask for a better symbol and its own color. The founder chose both from twelve options. The five industry lifecycle cards each carry a drawn mark in its own style and colors, so no two marks look alike and the row never reads as an icon set. Some carry one or two invented letters, set as outlines, never a real client's initials: banking a minimal "N." : a burgundy high-contrast serif N with one gold full stop, the N the sole focus; insurance an editorial, consulting-style monogram: a white high-contrast serif "Ry" on an ink-navy square over one electric-blue rule (the founder asked for "hardcore McKinsey style": the register, never McKinsey's own mark); airlines an H on a tail fin with livery stripes (blue), healthcare an "m" between two gradient crescents (teal), retail "ro" on a pink badge. A client that allows its logo shows its own symbol only, with the wordmark cut out. No card shows a client name: the line under the category is gone.
+- **Why:** founder, 2026-11-02: "create 2 logos frm scratch for the ai run hedge fund & the executive search firm, so there is a proper logo, dont make a name clear but give a clear logo", then on symbol-only marks: "MAKE IT LEGIT, better looking LOGOS" and "these look ass", then on the lockups: "NO TXTS ONLY SUMBOL!!!" and "only have category alwasys not client name". A symbol alone at card size reads as an icon. A symbol with set type reads as a firm's logo. Before, the two cards showed a Phosphor glyph on a grey tile beside the CityU, WRITER and Wring logos.
+- **Where:** `apps/web/public/media/case-studies/asset-management.svg`, `apps/web/public/media/case-studies/executive-search.svg`, `apps/web/src/features/marketing/case-studies/content.ts`, [art-direction.md](visual/art-direction.md) (the "invented logos" rule).
+- **Supersedes:** nothing. It is an exception to the "invented logos" item in [art-direction.md](visual/art-direction.md), for anonymous case-study cards only.
+- **Source:** the `case-studies` branch.
+
+### D35 The home hero is "The CompanyOS", four traits above it, and the positioning line "the cloud-native agent harness for companies"
+- **Date:** 2026-11-02
+- **Decision:** The home hero title is the fixed line "The CompanyOS". Above it, a quiet muted line of four traits in this order: Open Source, Extensible, Multiplayer, Sovereign, each with its Phosphor glyph (`GitForkIcon`, then the home pillars' own `CodeIcon`, `UsersThreeIcon`, `ShieldCheckIcon`). No check marks, no divider; a two-by-two grid below `sm`. The subhead is the positioning line plus its mechanism: "The cloud-native agent harness for companies. Always-on agents that start on events, run in parallel and share one memory of your company." The same positioning line is the README tagline ("The open-source CompanyOS: the cloud-native agent harness for companies.") and opens the docs index, the Guide and the Developers page. The README and the docs carry the deeper mechanism (pi agents, My Kortix routing, triggers and loops, one cloud computer per session, persistent state).
+- **Why:** founder, 2026-11-02. On the README: "add that its a Harness Platform allowing u to deploy custom agents in pi to the cloud and orchestrate them with event driven design to form 24/7 loops and let agents run in swarms", as "a fundamental description change". On the hero: "The CompanyOS as the title", "put open Source first", "put Sovereign last", "instead of ticks something more suitable", the right-aligned list read as detached (the line-above-title layout won), and on "Hand it an outcome and AI agents run it 24/7. They work in your tools…": "so fluffy. it can apply to everything… call it company-based like harness, cloud-native like deepseek branding". A first harness-first draft that listed cloud computers and swarms was "too technical": the line names the category and three mechanisms in plain verbs, nothing more.
+- **Where:** `apps/web/src/features/marketing/landing-hero/sand-band-hero.tsx`, `README.md`, `apps/web/content/docs/index.mdx`, `apps/web/content/docs/guide.mdx`, `apps/web/content/docs/developers.mdx`, [positioning.md](verbal/positioning.md) section 1.
+- **Supersedes:** D21 (the cycling hero word). D18's Promise leaves the hero subhead; it stays a sanctioned line for pitches and the Outcomes section.
+- **Source:** the `harness-platform-copy` branch.
+
+## 2026-10-31
+
+### D34 Product chrome draws status with a glyph; status emoji stay in the agent's own words
+- **Date:** 2026-10-31
+- **Decision:** A row, card, badge or label that Kortix draws around the conversation shows a state with the tool-row glyphs: a `kortix-green` check for done, a `kortix-red` warning for a failure, a neutral stop circle for a stop. It never shows an emoji. The D31 status emoji (✅ ⏳ 🙋 🔒 💡 ⚠️ 👋) remain allowed only in the text My Kortix writes. The background-agent notice ("Write lighthouse poem finished") is a tool row like the "Agent · general" card that started it: the same height, type, caret and "View" action. A first result line that only says "Done." is left out, because "finished" already says it.
+- **Why:** founder, 2026-10-31, on the notice row "✅ Write lighthouse poem finished · Done.": "why always the icon when it says the emoji [...] it always looks a bit sus [...] i think that component could be a bit smoother". The emoji sat directly above the agent's own "✅ The poem's done" line, so the same mark showed twice in two visual languages.
+- **Where:** `packages/ui/src/session/turn/subagent-notice-row.tsx`, `packages/ui/src/session/tool/shared/full-view-action.tsx`, [voice-and-tone.md](verbal/voice-and-tone.md) section 2 (the D31 rule) and the "no emoji in Kortix-authored copy" rule.
+- **Supersedes:** nothing. It narrows how D31 is applied: D31 never covered product chrome.
+- **Source:** the `agent-notice-row` branch.
+
+## 2026-10-30
+
+### D33 The TUI shows the pixel Kortix symbol, monochrome; turquoise only on the selection marker and the cursor
+- **Date:** 2026-10-30
+- **Decision:** The TUI's boot screen and empty state draw the Kortix symbol from `PIXEL_KORTIX_ROWS` (now `@kortix/shared/pixel-mark`, the grid the web's pixel mark, the merch chips and My Kortix's agent mark use), solid cells in the foreground color and curve cells at half ink. No block-letter wordmark and no turquoise on the symbol. The empty state is the symbol, one hint and one quiet line, centred. The dither field (the web CTA's Bayer-dithered fbm, in braille) runs only on the boot screen. A click on the symbol, or `/life`, plays Conway's Game of Life seeded from it, as the web's `/game-of-life` page does. `terminal-accent` stays on two TUI marks: the `▌` selection marker and the text cursor. The CLI banner keeps the turquoise wordmark (D32).
+- **Why:** founder, 2026-10-30, on the turquoise wordmark splash: "can u make this not be turqoise make it the be the actual like kortix symbol [...] do the whole conway game of life thing if u Click it", "go through the web codebase and takeover as necessary like we already have this ascii style going", and on the result: "it can be giga-minimal but everything that's centered and clean".
+- **Where:** `apps/tui/src/ui/splash.tsx`, `apps/tui/src/lib/life.ts`, `apps/tui/src/lib/dither.ts`, `packages/shared/src/pixel-mark.ts`, `apps/tui/src/theme.ts`, `visual/brandmark.md`, `visual/color.md`.
+- **Supersedes:** D32 for the TUI: the wordmark on the TUI splash, and turquoise on the TUI wordmark.
+- **Source:** the `tui-session-first` branch.
+
+### D32 The terminal accent is turquoise; the ASCII wordmark is sanctioned in the CLI and the TUI
+- **Date:** 2026-10-30
+- **Decision:** The CLI and the TUI share one accent, `terminal-accent` (turquoise; the CLI prints it as ANSI cyan). It marks three things only: the block-letter KORTIX wordmark, the one-column `▌` selection marker, and the text cursor. Focus borders, prompts and highlights stay monochrome. The ASCII wordmark in `apps/cli/src/banner.ts` is sanctioned on the CLI landing screen and on the TUI boot and empty-session splash. Customer output (D8c) is not affected.
+- **Why:** founder, 2026-10-30, on the session-first TUI: "add hints of that turqoise accent color [...] like a dope as booting KORTIX THING", then chose "Turquoise, CLI cyan" over `kortix-base` so the CLI and the TUI read as one product. After a first build that also drew focus borders, prompts and highlights in it: "way toooo much turqoise", so it is rationed to the three marks.
+- **Where:** `visual/visual-system.json` (`color.terminal.terminal-accent`), `visual/color.md` (CLI rule), `apps/tui/src/theme.ts`, `apps/tui/src/ui/splash.tsx`, `apps/cli/src/banner.ts`.
+- **Supersedes:** the "ASCII wordmark: OPEN" status for the CLI and the TUI in `visual/brandmark.md` and `visual/color.md`.
+- **Source:** the `tui-session-first` branch.
+
+### D31 My Kortix speaks plainly to a non-technical person, warm and a little playful; emoji are status labels
+- **Date:** 2026-10-30
+- **Decision:** My Kortix, the built-in agent, assumes the person is not technical. It uses the words people see on the screen, never the plumbing (no sandbox, repo, branch, CLI, YAML, token or 403), and mirrors a person who writes technically. It sounds like a quick, warm, slightly cheeky colleague with opinions, not an AI assistant: no filler opener, no "Let me know if you need anything else", one concrete offer at the end. Emoji are allowed in its replies only as status labels, at most one, at the start of a status line, from a fixed set: ✅ done, ⏳ working on it, 🙋 needs you, 🔒 needs a permission, 💡 an idea, ⚠️ a problem, 👋 hello (first message only). Never mid-sentence, never about money or its own mistake. A short humorous aside is allowed, never in an apology, bad news or money.
+- **Why:** founder, 2026-10-30, on a My Kortix reply that explained its sandbox, shell and CLI: "it should assume the user is non technical and speak simple & like fluffy", and on the voice options: "Yes give it a twist, come up with something out of Distribution so it doesnt sound generic like every ai assistant". Labels, not decoration, keeps the "emoji can identify content" rule.
+- **Where:** `apps/api/src/projects/lib/my-kortix-prompt.ts` (the "Your voice" and "Plain words" sections), [voice-and-tone.md](verbal/voice-and-tone.md) section 2 (agent persona).
+- **Supersedes:** nothing. Section 2's sentence-length and no-filler rules still apply.
+- **Source:** the `my-kortix-v2` branch.
+
+### D30 The sign-in screen has no subtitle
+- **Date:** 2026-10-30
+- **Decision:** The sign-in entry step shows only "Welcome to Kortix CompanyOS". The tagline "The open-source CompanyOS" no longer sits under it, and no other line replaces it. The tagline is never placed directly under a heading that already says "Kortix CompanyOS".
+- **Why:** founder, 2026-10-30, on "Welcome to Kortix CompanyOS / The open-source CompanyOS": "kinda repetitive, fix that", then "just remove that second line".
+- **Where:** `apps/web/src/app/[locale]/(auth)/auth/page.tsx`, `StepHeader` in `packages/ui/src/internal/auth/auth-primitives.tsx` (the `tagline` prop is gone), `auth.unified.tagline` removed from every locale catalog, [positioning.md](verbal/positioning.md) Tagline and "Auth screen subtitle" rows.
+- **Supersedes:** the "auth screen" use of the tagline in positioning.md.
+- **Source:** the `auth-subtitle-promise` branch.
+
+## 2026-10-29
+
+### D29 Kortix CompanyOS is the product name on every identity surface; the Promise says "AI agents"
+- **Date:** 2026-10-29
+- **Decision:** Every surface that names the product says "Kortix CompanyOS": the page-title suffix (`<page> | Kortix CompanyOS`), the session tab title, Open Graph `siteName`, the PWA manifest `name`, the docs title, the MCP server title, the OAuth resource name, the agent-discovery title, the desktop window title, the sign-in and trial welcome screens, the README, the GitHub repo description and topics, and the GitHub org description. "AI Operating System" and "AI OS" leave the structured data (`alternateName`), the keywords, the launch film and the test fixtures too. Running text keeps "Kortix" as the short name ("Sign in with Kortix", "Connect Slack to Kortix"). Four names stay "Kortix" because a longer name truncates or breaks: the PWA `short_name`, the mobile home-screen name (`app.json`), the desktop `productName` (it names the user-data folder and the installer files), and the Slack and Teams bot mention name (`@Kortix`); the Slack app name and the Teams full name are "Kortix CompanyOS". The agent is still named Kortix. The Promise line reads "Hand it an outcome, AI agents run it 24/7".
+- **Why:** founder, 2026-10-29: "lets call it CompanyOS everywhere-- lets rename everywhere lets rename the entire product into Kortix CompanyOS hardcore", "even the README of the repo & the git repo itself we will rename to company-os or similar, dont do rename yet there but like all GH descriptions, the readme itself etc.", and on the hero subhead: "say Ai Agents".
+- **Where:** `packages/ui/src/internal/lib/site-metadata.ts`, `apps/web/src/app/[locale]/layout.tsx`, `apps/web/public/manifest.json`, `apps/web/blume.config.ts`, `apps/api/src/mcp/index.ts`, `apps/api/src/oauth/discovery.ts`, `apps/web/src/lib/agent-discovery.ts`, `apps/desktop-electron/src/main.js`, the `welcome` strings in every locale catalog, `apps/mobile/locales/en.json`, the Slack and Teams manifests, `README.md`, the hero subhead (`sand-band-hero.tsx`), [positioning.md](verbal/positioning.md) Promise row. The repository is still `kortix-ai/CompanyOS`; renaming it is a later step.
+- **Supersedes:** D28's "old names kept in `alternateName` and keywords" and its launch-film exclusion; D18's Promise wording ("agents" becomes "AI agents").
+- **Source:** the `framework-pi` branch.
+
+### D28 The category is CompanyOS; the product is Kortix CompanyOS
+- **Date:** 2026-10-29
+- **Decision:** "AI Operating System" and "AI OS" are retired as the category. The category is **CompanyOS** (one word, capital C, capital OS). The product name is **Kortix CompanyOS**. The tagline is "The open-source CompanyOS". Page titles read "Kortix CompanyOS – the open-source operating system for your company". The site switcher reads "CompanyOS | Services". The hero keeps its shape: "The sovereign CompanyOS", "The <word> CompanyOS". The company stays Kortix (`Organization` name). Structured data keeps "Kortix AI Operating System" and "Kortix AI OS" as `alternateName`, and the meta keywords keep "AI Operating System", so existing search traffic still finds the site. Sentences about other vendors "becoming AI operating systems" keep the generic phrase. Blog post slugs do not change.
+- **Why:** founder, 2026-10-29: "let's rebrand everywhere and call it company os", then "Kortix CompanyOS".
+- **Where:** the web app (titles, metadata, hero, nav, enterprise, services, about, open-source, launch, llms.txt), 60 blog posts, the docs, every locale catalog, `packages/ui` site metadata and tagline, the CLI banner, `scripts/install.sh`, the email footer, the Slack and Teams app manifests, the starter template, README, MANIFESTO, package descriptions, [positioning.md](verbal/positioning.md), [voice-and-tone.md](verbal/voice-and-tone.md), [concepts.md](verbal/concepts.md). Not changed: the launch film (the `launch-film` worktree deletes it), SDK test fixtures.
+- **Supersedes:** D10's category name ("AI Operating System") and the category noun in the D16 and D21 hero lines. D19 ("the Operating System for SuperIntelligence" on `/about`) is not affected. D10's idea (an operating system is the layer everything runs on) stays.
+- **Source:** the `framework-pi` branch.
+
+### D27 Company as code names pi: custom pi agents, pi extensions, deployed to the cloud
+- **Date:** 2026-10-29
+- **Decision:** The framework surfaces lead with pi as the minimal agent harness Kortix runs on. Every agent you declare is a custom pi agent. You extend it with pi extensions: TypeScript in the repository or a pi package pinned from npm, registered under `extensions` in `kortix.yaml` and enabled per agent. Kortix deploys the agents to the cloud, one computer per session. `/framework` carries this in the hero sub, the pillar "Custom pi agents", the tab "pi extensions" (with a real extension file in the Arcadia sample) and the FAQ. The home Company as code pillar now names pi and pi extensions too. The home hero's Framework window header reads "Agents run on pi"; its steps do not include a pi extensions step (founder: "just feels forced"). The hero headline and the Multiplayer and Sovereign pillars still do not name pi.
+- **Why:** founder, 2026-10-29: "https://kortix.com/framework should definetly reference PI & explain that u write custom PI agents that get deployed to the cloud, with pi extensions & all like very imp piece", and on the home Company as code pillar: "also in here like saying that wouldnt be bad I guess", then: "also in the framework tab on the homepage, show the pi extensions and whatnot or indications of pi and that pi is used. make the kortix yaml as legit as possible in the example thing".
+- **Where:** `apps/web/src/features/marketing/framework/` (`model.ts`, `content.ts`, `framework-panels.tsx`), `landing-hero/framework-window.tsx`, `landing-sections/pillars-band.tsx`, `landing-sections/framework-band.tsx`, [claims.md](verbal/claims.md) row "Extensions".
+- **Supersedes:** D20 for the Company as code pillar.
+- **Source:** the `framework-pi` branch.
+
+### D26 Email card: one logo, one left edge, one type scale
+- **Date:** 2026-10-29
+- **Decision:** The symbol shows once, 20 px wide, in the header row; the card has no logo. The header carries no label: no email names its type ("Sign in", "Password reset", "Billing") anywhere above the title, and `renderEmail` has no `kicker` input. Every block inside the card sits on one left edge with a 40 px inset (24 px on mobile). The type scale has four steps: title 24 px / 600 / line height 1.25 / tracking −0.48 px, body 15 px / 400 / 1.6, label 13 px, small 12 px; emphasis is 500. The one-time code uses the sans face with tabular digits, never the mono face. The footer is centered: tagline, social icons, `kortix.com`.
+- **Why:** founder, 2026-10-29: the logo twice "looks a bit weird", the code must not be mono, and the title and description hierarchy was "not proper".
+- **Where:** `visual/visual-system.json` (`email`), `scripts/generate-tokens.ts`, `apps/api/src/lib/email/template.tsx`.
+- **Supersedes:** D25 for the card logo, the centered card and the 28/16 sizes. The Barebone frame stands.
+- **Source:** the `email-redesign` branch.
+
+### D25 Transactional email uses the React Email Barebone layout
+- **Date:** 2026-10-29
+- **Decision:** The email shell copies the React Email demo template 01-Barebone (activation / password-reset), built with `@react-email/components` and rendered with `renderToStaticMarkup`. A grey page (`--card`), a 640 px white frame (`--background`) with a header row (the symbol 23 px wide on the left, the kicker on the right), one grey card with radius 8 holding the symbol (48 px wide), a 28 px title, 16 px body text in a 380 px column, the button and the note, then a white footer with the tagline, three social icons (X, LinkedIn, GitHub, served from `apps/web/public/email`) and a `kortix.com` link. The `mobile:` variants ship as one `<style>` media query at 600 px. The logo is the Brandmark PNG (the symbol), not the lockup. Colors stay on the token roles: Barebone's three text greys collapse onto `--foreground` and `--muted-foreground`; the font stays the system stack (D8a), not Inter. The copy-paste link under the button is gone; the plain-text part keeps the URL.
+- **Why:** founder, 2026-10-29: the shipped email was "not good UI-wise"; use React Email and make it "exactly the same" as the Barebone templates.
+- **Where:** `visual/visual-system.json` (`email`), `scripts/generate-tokens.ts`, `apps/api/src/lib/email/template.tsx`, `visual/layout.md` Email layout, `visual/brandmark.md` email logo.
+- **Supersedes:** the layout numbers and the lockup logo of the 2026-10-01 email entries (Q27, Q51); the light-only and color-role rules stand.
+- **Source:** the `email-redesign` branch.
+
+---
+
+## 2026-10-27
+
+### D24 The framework surfaces explain Kortix as a backend framework and name pi
+- **Date:** 2026-10-28
+- **Decision:** The home hero band is a slider: the workspace on the left, the same sample project as code on the right (its repository with `kortix.yaml` open). A home band ("A workspace for your team. A framework underneath.") and the `/framework` page explain Kortix as a backend framework for agents: a project is a git repository, `kortix.yaml` declares agents, skills, tools and triggers, every session runs the open-source pi coding agent on its own computer, triggers run agent loops 24/7, and `@kortix/sdk` and `@kortix/ui` compose your own experience. `/framework` carries the architecture diagram (clients, the Kortix API, the project repository, the session computer, the LLM gateway). These framework surfaces may name pi; the hero headline, the pillars and other core copy still do not (D20).
+- **Why:** founder, 2026-10-28: "what doesnt come out enough on the homepage is like that u have the WORKSPACE UI for humans... But everything is code & KORTIX FRAMEWORK, Kortix.YAML & PI CODING AGENT as basis", and "a FRAMEWORK pAGE IN full that shows the technical architecture diagram".
+- **Where:** `apps/web/src/features/marketing/landing-hero/workspace-framework.tsx`, `framework-window.tsx`, `landing-sections/framework-band.tsx`, `features/marketing/framework/`.
+- **Supersedes:** D20 for the framework surfaces only.
+- **Source:** the `services-page` branch.
+
+### D23 The home "Run any model" tab names the managed models with their versions
+- **Date:** 2026-10-27
+- **Decision:** The home How it works tab "Run any model" shows the provider marks (any provider with your own keys) and names the Kortix-managed models with their versions, today "DeepSeek V4.1 Flash" and "GLM 5.3 Flash", served with zero data retention. The names live in one constant, `MANAGED_MODELS` in `step-providers.tsx`; it follows Platinum Inference's `GET /v1/inference/models`. Everywhere else the families-only rule in [claims.md](verbal/claims.md) holds. The separate home sections "Need an internal app?" and "Every model, one bill." are removed: Apps and models are tabs of How it works.
+- **Why:** founder, 2026-10-27: "it should just be model-agnostic: connect any model provider ... show the actual logos ... say we offer deepseek v4 1 ... fold all of these ideas fully into how kortix works".
+- **Where:** `apps/web/src/features/marketing/landing-sections/how-it-works-tabs.tsx`, `step-apps.tsx`.
+- **Status:** reverted 2026-10-28 by the design cleanup on the `services-page` branch ("cleaner home and services sections"): the tab shows the model-slot panel again and names no versions. The families-only rule holds everywhere.
+- **Supersedes:** the families-only rule for this one tab.
+- **Source:** the `services-page` branch.
+
+### D22 `/about` is the vision page: SuperIntelligence, AGI and self-improving companies run by AI
+- **Date:** 2026-10-27
+- **Decision:** `/about` is about SuperIntelligence and AGI: Kortix builds every layer (operating system, agent harness, infrastructure, governance, the 24/7 loop, then training and evals) so companies can run on AI at scale, improve as they operate, and stay their own. Its sections: the hero (D19), "The thesis." (companies will run on AI, they will improve themselves, they have to be owned), "Every layer, A to Z.", "Self-improving companies." and the mission line. On this page only, and only as direction (future tense or "we are building"), copy may say "AGI", "SuperIntelligence", "self-improving companies" and "run by AI". It still never says "self-driving company" or "autonomous company" (positioning.md, retired lines). Elsewhere the idea appears at most as one line, e.g. the home Outcomes sub: "Every run makes the next one better."
+- **Why:** founder, 2026-10-27: "THE WHOLE ABOUT PAGE SHOULD BE ABOUT SI/AGI & how we are building all the infrastructure, harness, architecture, operating system, a to z so u can run it on scale to build self improving autonomous self driving organizations, that are run by AI", and "I don't want to say that [in the home hero], but I want to add that aspect".
+- **Where:** `apps/web/src/features/marketing/about/content.ts`, `about-page.tsx`; `apps/web/src/features/marketing/landing-sections/use-cases-section.tsx` (the one home line); [positioning.md](verbal/positioning.md) AGI rule.
+- **Supersedes:** the `/about` sections "What we believe." and "Build, host, manage, monitor."
+- **Source:** the `services-page` branch.
+
+### D21 The home hero cycles the pillars: "The sovereign / multiplayer / extensible AI Operating System"
+- **Date:** 2026-10-27
+- **Decision:** The home hero title is "The <word> AI Operating System", the word cycling through sovereign, multiplayer, extensible and open (the three pillars, D16, plus "open", founder 2026-10-27: "also add open"). The muted line "for companies that own their …" is gone. Because the hero now names the pillars, the compact three-column pillar band moves down the page, right under the case studies (founder: "move that elsewhere", then "move it up under CASE STUDIES"). Screen readers read "The sovereign, multiplayer, extensible and open AI Operating System".
+- **Why:** founder, 2026-10-27: "The sovereign/multiplayer/extensible AI Operating Systems, maybe these 3 instead as switcher … & then remove the for companies that own their".
+- **Where:** `apps/web/src/features/marketing/landing-hero/sand-band-hero.tsx`.
+- **Supersedes:** D16's fixed hero line "The sovereign AI Operating System" and the rotating "own their" line.
+- **Source:** the `services-page` branch.
+
+### D20 Core marketing copy does not name pi
+- **Date:** 2026-10-27
+- **Decision:** The home hero, the pillars and other core marketing copy do not name pi. The Company as code pillar reads "Extensible to the core." and says the agent harness is open source and yours to extend. pi stays named in docs, the changelog, developer pages and claims.md row "Harness".
+- **Why:** founder, 2026-10-27: "remove the PI everywhere in core context as nobody will know what it is out of box".
+- **Where:** `apps/web/src/features/marketing/landing-hero/sand-band-hero.tsx`, `apps/web/src/features/marketing/landing-sections/pillars-band.tsx`.
+- **Supersedes:** D16's "Extensible, powered by pi." pillar line and its naming of pi in the home copy.
+- **Source:** the `services-page` branch.
+
+### D19 The `/about` hero: "We are building the Operating System for SuperIntelligence"
+- **Date:** 2026-10-27
+- **Decision:** The `/about` hero reads "We are building the Operating System for SuperIntelligence. One you own end to end, every part of it." "SuperIntelligence" (capital S and I, founder: "write SI in big letters") is founder vision: it appears in the `/about` hero only, in the future or progressive tense ("we are building"), never as a category, a page title elsewhere or a product claim.
+- **Why:** founder, 2026-10-27: "We are building the Operating System for SuperIntelligence that you can own e2e every aspect".
+- **Where:** `apps/web/src/features/marketing/about/content.ts` (`hero`); [positioning.md](verbal/positioning.md) rule on "AGI", which this extends.
+- **Supersedes:** the `/about` hero line "We are building the open-source AI Operating System."
+- **Source:** the `services-page` branch.
+
+### D18 The home page adds the Promise: "Hand it an outcome, agents run it 24/7"
+- **Date:** 2026-10-27
+- **Decision:** Beside the sovereign category line (D16), the home page says what Kortix does for a company: hand it an outcome and agents run it 24/7. The hero subhead opens with it, and the Outcomes section's header carries the outcome loop (Outcome, Plan, Work, Verify, Learn, 24/7) above each team's outcomes; there is no separate 24/7 section, built from triggers, sessions, change requests and memory. No early-access label: the founder states it works today. The copy says "agents" and "AI-native operating system for your company", never "AI workers", "AI employees", "self-driving" or "autonomous company".
+- **Why:** founder, 2026-10-27: "not on the edge of like AI-native Company OS, OS to run your company in loops let agents run 24/7 … run company 24/7 on ai employees", then "combine all this stuff with like the outcome engine … runs company outcome 24/7". "AI employees" is held back because it sits beside the retired "AI Worker" line and implies no human gate; the founder may override.
+- **Where:** [positioning.md](verbal/positioning.md) row "Promise" and its rule; `apps/web/src/features/marketing/landing-hero/sand-band-hero.tsx`, `apps/web/src/features/marketing/landing-sections/use-cases-section.tsx` (the Outcomes header).
+- **Supersedes:** nothing; it adds a layer to D10 and D16.
+- **Source:** the `services-page` branch.
+
+### D17 Compliance copy says "SOC 2 Type I verified" and never mentions Type II
+- **Date:** 2026-10-27
+- **Decision:** Every surface states SOC 2 as "SOC 2 Type I verified". Type II is not mentioned anywhere: no "in progress" seal, row, line or footnote. GDPR stays "a posture Kortix runs, not a certificate". No ISO, no HIPAA.
+- **Why:** founder, 2026-10-27: "no whether mention Type ii in progress, just say Soc 2 type 1 verified".
+- **Where:** [claims.md](verbal/claims.md) row "Compliance" and the SOC 2 rule; `/security`, `/enterprise`, `/contact`, `/services`, the home trust band, the a1o page, the README and the open-source blog post.
+- **Supersedes:** the "two facts" SOC 2 rule in claims.md (Type I held, Type II in progress).
+- **Source:** the `services-page` branch.
+
+### D16 The home hero says "The sovereign AI Operating System", and the home page leads with three pillars
+- **Date:** 2026-10-27
+- **Decision:** The home page hero opens on "The sovereign AI Operating System". Right after the hero, the home page leads with three pillars, in this order and with these names: **Multiplayer AI** ("One AI for the whole team."), **Company as code** ("Extensible, powered by pi."), **Sovereign and open** ("Own your data and your infrastructure."). "Open source" stays in the pillar and in sentences. pi is named as the open-source agent harness every session runs.
+- **Why:** founder, 2026-10-27: "today we are launching the sovereign AI Operating System", then "what has to come forward are the 3 CORE PIECES … MULTIPLAYER AI. COMPANY AS CODE / EXTENSIBLE POWERED BY PI & SOVEREIGN/OPEN".
+- **Where:** `apps/web/src/features/marketing/landing-hero/sand-band-hero.tsx`, `apps/web/src/features/marketing/landing-sections/pillars-band.tsx`, [claims.md](verbal/claims.md) row "Harness".
+- **Supersedes:** D10's tagline in the home hero only. Page titles, README, CLI banner, auth screen and meta descriptions keep "The open-source AI Operating System" until the founder extends this decision.
+- **Source:** the `services-page` branch.
+
+### D15 `/services` sells "AI Transformation" for a flat $20,000 a month, with a quiet guarantee
+- **Date:** 2026-10-27
+- **Decision:** The site sells two things: the AI OS (every product page) and AI Transformation, a done-for-you service, on `/services`. `/services` is a standalone sales page with its own shell and an AI OS | Services switcher. The page says "we" and "our team". The roles (Deployment Strategists, Forward Deployed Engineers) appear once, in the FAQ, with no headcount and no "full time". The page sells three things in one membership: AI Strategy (an audit, baselines, a ranked roadmap), AI Transformation (map the company, unify its data, automate the work with agents, build custom software) and AI Education (we teach the customer's existing team). The price is a flat $20,000 a month: no discount, no "limited time", no strike-through. The guarantee stays low-key, one line, never a card or a headline: "Not loving it in the first 2 weeks? Get 50% back, no questions asked." "Join now" is a Stripe Payment Link. "AI Transformation" is the service's name on `/services` only.
+- **Why:** founder, 2026-10-27: "make it a custom sales experience", "the actual Stripe 1 click checkout as well as the book intro call", "call it an AI TRANSFORMATION service … we map your org, what humans do, how they operate & we automate", the guarantee "more lowkey", then "the 5k off makes it too fishy, remove that and keep it at 20k, say DEPLOYMENT STRATEGIST & FORWARD DEPLOYED ENGINEER e2e", then "take away the fulltime thing … we dont specify the 1 DS & 1 FDE, just keep it more general", "remove all that overindexing on FDE/strategist", "bring ai strategy and ai education into it. we teach our existing team".
+- **Where:** `apps/web/src/features/marketing/services/content.ts` (terms and accuracy gate), `apps/web/src/app/[locale]/(public)/(sales)/`, `apps/web/src/features/marketing/kit/site-switcher.tsx`, [claims.md](verbal/claims.md) row "Services offer", [voice-and-tone.md](verbal/voice-and-tone.md) Don't say row.
+- **Supersedes:** the "no price outside `/pricing`" practice and the "AI transformation" ban, for `/services` only. Every other surface keeps both.
+- **Source:** the `services-page` branch.
+
+## 2026-10-25
+
+### D14 Empty states of a tab, folder or list draw `EmptyArt`
+- **Date:** 2026-10-25
+- **Decision:** The empty state of a tab, a folder or a list is `EmptyState` with `media={<EmptyArt icon={…} />}`: the stacked-card illustration (`packages/ui/src/primitives/empty-art.tsx`) with one Phosphor glyph on the front card (no glyph: a document, for an empty folder). Then one title, one sentence, and outline buttons with a leading icon (`Button variant="outline" size="sm"`). No other decorative tile, illustration or card.
+- **Why:** Jay, 2026-10-25: the channel tabs (Memory, Links, Triggers, Apps, Threads) and the Files folders draw one picture for "nothing here yet", so every empty tab reads the same. One muted line on a full-height tab read as a broken page.
+- **Where:** `visual/layout.md` (States), `verbal/voice-and-tone.md` section 4, `kortix-design-system` (Required primitives, Which component for which state, Dos and Don'ts). Shipped in `packages/ui/src/workspace/spaces/space-links.tsx`, `space-triggers.tsx`, `space-threads-tab.tsx`, `packages/ui/src/workspace/memory/memory-empty.tsx`, `apps/web/src/features/apps/space-apps-view.tsx`, `apps/web/src/features/drives/space-folder-view.tsx`, `packages/ui/src/files/project/components/drive-explorer.tsx`.
+- **Supersedes:** D4g ("one muted line, no icon tile") and Q4 ("the pixel mark as a sibling above `EmptyState size=\"sm\"`") for the empty state of a tab, a folder or a list.
+- **Source:** Jay Suthar, the `project-channels` branch.
+
+### R1 Role badges: one hue per rank, the owner purple
+- **Date:** 2026-10-25
+- **Decision:** Role badges read as a ladder: owner `royal` (`bg-kortix-purple/15`), account admin `info` (blue), project manager `success` (green), custom role `secondary` and member `default` (neutral ink), no access `muted`. Every role badge is borderless (`ring-0`) and sans (`normal-case`). `kortix-purple` gets its one meaning: the owner.
+- **Why:** Jay, 2026-10-25: a project member in muted text read as "no access", and the owner in grey did not read as the top of the hierarchy. "The owner should be royal."
+- **Where:** `packages/ui/src/primitives/badge.tsx` (`royal`), `ROLE_TONE` in `apps/web/src/features/accounts/hub/member-table.tsx`, `visual/color.md` (Accents and status).
+- **Supersedes:** the `kortix-purple` "Reserved" row in `visual/color.md`.
+- **Source:** Jay Suthar, account Members and project access tables.
+
+---
+
+## 2026-10-19
+
+### K9 `@kortix/ui`: the shared Tailwind v4 component library
+- **Date:** 2026-10-19
+- **Decision:** `packages/ui` (`@kortix/ui`) is the one React component library for `apps/web`, Kortix Apps and SDK hosts. Components are the `apps/web/src/components/ui` files, moved with the same Tailwind v4 class strings, under `packages/ui/src/primitives/`. `apps/web` imports `@kortix/ui/<name>` and the module entries directly; it keeps no re-export shims (`tests/unit/web-no-ui-shims.test.ts`). Styles ship as `@kortix/ui/tokens.css` (generated, `:root` and `.dark`), `@kortix/ui/theme.css` (the `@theme inline` keys, utilities and keyframes moved out of `apps/web/src/app/globals.css`), `@kortix/ui/styles.css` (prebuilt `dist/styles.css` for hosts without Tailwind) and `@kortix/ui/fonts.css` (Roobert, Kortix-owned surfaces only, D8). White-label hosts override the CSS variables and never fork a component. The kit-styled `Popover`, `OptionList`, `Select` and `FilterBar` of K8 are deleted. A host composes a filter bar from `popover` and `command`; `FilterBar` / `FilterBarItem` in `tabs` are the pill row. `kit.css` (`k-*`) stays the kit for plain HTML without React and is not part of `@kortix/ui`.
+- **Why:** two styling systems for one component set drift. One package keeps `apps/web`, the white-label demo and every SDK host on the same components.
+- **Where:** `packages/ui`, `packages/ui/README.md`, `packages/ui/skills/kortix-ui/SKILL.md` (the package skill, mirrored for Kortix sessions in `packages/starter/templates/managed/skills/kortix-ui/`), `packages/ui/src/session` (`@kortix/ui/session`), `apps/web/content/docs/sdk/ui.mdx`, `scripts/generate-tokens.ts`.
+- **Supersedes:** K8. `sync-kortix-brand` in `kortix-ai/company` copies only `visual/fonts.css`, `visual/tokens.css` and `visual/kit.css`, so no App copied the deleted K8 files.
+- **Source:** the `kortix-ui` branch.
+
+### K8 (SUPERSEDED by K9) `@kortix/ui`: the interactive components for Apps
+- **Date:** 2026-10-19
+- **Decision:** `packages/ui` (`@kortix/ui`, private) holds the interactive components that CSS cannot provide: `Popover`, `OptionList` (search, ↑/↓, Enter, Home/End), `Select` and `FilterBar` (Linear-style chips behind one Filter button). They are built on the Radix Popover that `apps/web` uses and are styled only by `kit.css` (`k-popover-panel`, `k-options`, `k-option`, `k-select-trigger`, `k-filter-bar`, `k-chip`). Kortix Apps get them through `sync-kortix-brand` in `kortix-ai/company`.
+- **Why:** the sales App rendered 8 filters as segmented controls and native selects, which took half the screen. Marko asked for proper components shared from suna.
+- **Where:** `packages/ui`, `visual/kit.css`.
+- **Supersedes:** none.
+- **Source:** the sales App filter bar in `kortix-ai/company`.
+
+### K7 `kit.css` adds the field
+- **Date:** 2026-10-19
+- **Decision:** `kit.css` adds `k-input` (input, textarea), `k-field` (label above a field) and `k-check` (checkbox row), copied from `inputSurfaceClasses` and `inputFocusClasses` in `input.tsx`.
+- **Why:** the sales App has forms, and an App without the field primitive writes its own field CSS.
+- **Where:** `visual/kit.css`.
+- **Supersedes:** none.
+- **Source:** the sales App refactor in `kortix-ai/company`.
+
+### K6 `kit.css`: the UI primitives as portable CSS classes
+- **Date:** 2026-10-19
+- **Decision:** `visual/kit.css` carries the `@/components/ui` primitives (Card, Button, Badge, status dot, banner, segmented control, table, list, stat, meter, popover, empty state) as `k-*` classes that read only `tokens.css` variables. HTML outside `apps/web` loads `fonts.css`, `tokens.css` and `kit.css` in that order and composes these classes before it writes its own CSS.
+- **Why:** every Kortix App and internal dashboard wrote its own palette and component CSS (the factory-status App shipped GitHub status hexes), so each read as a second product.
+- **Where:** `visual/kit.css`, `SKILL.md` Standalone HTML row.
+- **Supersedes:** none.
+- **Source:** the factory dashboard rebuild in `kortix-ai/company`.
+
+## 2026-10-09
+
+### D13 A backend is an App of kind `convex`
+- **Decision:** A Convex-powered backend is an App of kind `convex`, not a product of its own. The CLI, API, SDK and skills name Apps, kinds and capabilities only (`kortix apps create <slug> --kind convex`, `/apps/:appId/snapshots`, `app.capabilities`). "Backend" stays the plain-language noun for what a `convex` App is, and the label of its kind badge in the web app. Never "database", "DB", "Convex project", or "app backend".
+- **Why:** The founder decided on 2026-10-09: "technically the backends are apps as well." One noun for every deployable thing removes a second inventory, a second permission set and a second CLI group. Clients branch on capabilities, so a future kind needs no new noun.
+- **Where:** `verbal/voice-and-tone.md` section 3 (product nouns), `apps/web/content/docs/apps.mdx` (template `convex`), the `kortix-apps` system skill (`packages/starter/templates/managed/skills/kortix-apps/`), the `kortix apps` CLI help.
+- **Supersedes:** D12 (the CLI `kortix backends`, the `/backends` API routes and the Backends product area; the banned synonyms stay).
+- **Source:** branch `apps-convex` (2026-10-09).
+
+## 2026-10-06
+
+### D12 "Backend" is the noun for a project's Convex-powered service
+- **Decision:** "backend" is the canonical noun for a project's Convex-powered data-and-logic service. Plural in the product area: "Backends". Never "database", "DB", "Convex project", or "app backend".
+- **Why:** A backend holds data, server functions, realtime queries, files and schedules, not only tables. "Database" understates it. One noun across the UI, the CLI (`kortix backends`), the API (`/backends`) and the docs. The word "backend" also appears in "Kortix as a Backend" (KaaB) and "Git backend". Those name other things. A reader tells them apart by context and by the product name "Backends" for this feature.
+- **Where:** historical. D13 retired every location this decision named: the Backends docs page, the two Backends system skills, the `kortix backends` CLI group and the `/backends` API routes are deleted (branch `apps-convex`). The noun now lives where D13 says.
+- **Supersedes:** none.
+- **Source:** Kortix Backends feature, branch `kortix-backends` (2026-10-06).
+
+## 2026-10-04
+
+### D10 The category line is "AI Operating System"
+- **Decision:** The category is "AI Operating System", short form "AI OS". The tagline is "The open-source AI Operating System". The brand name stays "Kortix". "AI Management System" is retired. The comparative line, the manifesto line and the mission do not change. "Autonomous Company Operating System" stays retired for its word "Autonomous".
+- **Why:** The founder chose it on 2026-10-04 with the instruction to use it everywhere: git, marketing, product, CLI, email and the brand kit. An operating system is the layer that agents, skills, memory, connectors, computers, channels and triggers run on. The marketing site is rebuilt on this line in the same branch.
+- **Where:** `verbal/positioning.md`, `verbal/voice-and-tone.md`, `verbal/concepts.md`, README, GitHub About, `packages/ui/src/internal/lib/site-metadata.ts`, the landing `content.ts`, `apps/cli/src/banner.ts`, `BRAND_FOOTER`, the Slack and Teams manifests, every `apps/web/translations/*.json`.
+- **Supersedes:** D1 (the category and tagline only; D1's retired-line list stays).
+- **Source:** founder decision, branch `webpage` (2026-10-04).
+
+## 2026-10-02
+
+### D9 (SUPERSEDED by D39) Harness naming when pi is the default
+- **Decision:** Open. The copy names OpenCode as the agent harness: "An agent is an OpenCode agent", "OpenCode-native". A second harness, pi, ships in the product. The plan is that pi replaces OpenCode. The founder has not decided what the copy says when a project's default harness is pi: name pi, name no harness, or keep OpenCode until it is removed.
+- **Why:** The old reason for the rule was false. It said that OpenCode is the only shipped harness and that the other harnesses are behind `KORTIX_ACP_RUNTIME`. No code reads that variable. The code has two harnesses (`registeredHarnesses` in `apps/kortix-sandbox-agent-server/src/harness/harness.ts`): OpenCode, the default, and pi, which a project selects with the experimental `pi_harness` flag or `runtime: pi` in `kortix.yaml`. No Claude Code or Codex harness exists in code. On 2026-10-02 pi does not have rewind, compaction, slash commands, MCP servers or a todo tool, so OpenCode stays the default and the OpenCode copy is true for a default project.
+- **Where:** `verbal/claims.md` (the harness rule), the accuracy gates in `apps/web/src/features/marketing/agents-and-skills/content.ts`, `faq/content.ts`, `how-it-work/how-it-works-content.ts` and `how-it-work/step/step-harness.tsx`. 11 marketing files name OpenCode.
+- **Supersedes:** the "Why" of the harness rule in `verbal/claims.md`. The rule itself stays.
+- **Source:** OpenCode decoupling W7, task G3 (2026-10-02).
+- **Until answered:** name OpenCode and no other harness on marketing, deck and sales surfaces. Do not name pi there. The product docs are not marketing: they name both harnesses (`apps/web/content/docs/project/agents.mdx`, section Harnesses). Change no marketing copy for pi before this entry has an answer. Answer it before the default harness of new projects moves to pi.
+
+## 2026-10-01
+
+### Q57 Round 3 freedoms marked intentional
+- **Decision:** These are author choices, not kit rules: the total length and paragraph count of a LinkedIn post beyond the 210-character hook (`kortix-social` owns platform limits, and it may be absent); the mobile `notifications.tsx` screen being withheld in prompt 9 (placeholder plus Guesses, Q38); the diagram label text in a scratch deck run, which the judge does not check when no catalog was copied; the optional `.txt` versus source choice for CLI output beyond the Q56 default; the order of two Also-load reads. Why: runs logged each as a guess and no judge showed a harm.
+- **Where:** `qa/fresh-agent.md` judge note.
+- **Source:** round 3 judge input (2026-10-01).
+
+### Q56 CLI quoting, missing-secret wording, help examples
+- **Decision:** A request for existing help or error text gets the shipped text verbatim, with named mechanical fixes only, and any rewrite goes in a `PROPOSED` block. The missing-secret rule gains the plural ("{n} required secrets are missing.") and one fix line naming `secrets set` and `secrets request`. The help structure rule asks for examples only when the command's help has them: `kortix secrets --help` has none (checked in `apps/cli/src/commands/secrets.ts` `HELP`, 2026-10-01). The CLI row names plain text as the default deliverable. Why: a run condensed the help and added an options line and examples the binary lacks, and a run was right to quote and not invent.
+- **Where:** `verbal/voice-and-tone.md` 5.4, `SKILL.md` CLI row.
+- **Supersedes:** the unconditional "then two or three real examples" in the first 5.4 rule.
+- **Source:** round 3 prompt 10 (2026-10-01).
+
+### Q55 QA setup from round 3
+- **Decision:** Each run starts from an empty directory (`rm -rf "$RUN"`). Tier A+ prompt 8 copies `navbar.tsx`. Prompt 6 copies `security-page` and `translations/en.json`. Prompt 9 copies `lib/ui/hit-target.ts` and `app/(settings)/_layout.tsx`, which `design.md` and `AGENTS.md` name. The Claude allowlist adds `agent-browser`, and the prompt names the audit path under `.agents/skills`. Why: prompt 8 found an earlier run's files, three prompts lacked a file the kit names, and a run was denied for calling the audit through `.claude/skills`. These are setup gaps, not kit rules.
+- **Where:** `qa/fresh-agent.md`.
+- **Source:** round 3 prompts 1, 6, 8, 9 (2026-10-01).
+
+### Q54 OG card title source, margin and anchor
+- **Decision:** Title source: H1, then nav label, then page eyebrow, then route slug. When silent the edge margin is spacing step 16 (about 59px) on all four sides, the symbol sits top-left, and the title sits flush-left on the bottom margin. The numbers stay OPEN under D8b: a design lead may change them. The OG row says to read no `verbal/` file. Why: three runs drew the margin, the anchor and the fallback alone, and a run read four verbal files for a card that states no copy.
+- **Where:** `visual/art-direction.md`, `SKILL.md` OG row.
+- **Source:** round 3 prompt 8 (2026-10-01).
+
+### Q53 Literals in a social post are plain text
+- **Decision:** A post writes `main`, `kortix.yaml` and commands without backticks. Why: LinkedIn and X render no mono, and a backtick is a visible character in a pasted post. `SKILL.md` section 1 now says to read `magic_trick.md` before any row file.
+- **Where:** `verbal/voice-and-tone.md` 5.9, `SKILL.md` section 1.
+- **Supersedes:** the "mono on every surface" reading of section 3 for pasted plain text.
+- **Source:** round 3 prompt 7 (2026-10-01).
+
+### Q52 Marketing HTML: padding step, hover, breakpoints, links, theme
+- **Decision:** `py-30` is a named exception to the allowed step list: it ships in `trust-section.tsx` and `connectors/shared.tsx`, and portable HTML writes `calc(var(--spacing) * 30)`. A filled primary button hovers to `hover:bg-foreground/90` (the `default` variant), written with `color-mix` in portable HTML, with no element opacity. Base styles are for a phone, with `min-width` queries only. Standalone HTML links `tokens.css` and `fonts.css` by relative path, copies them beside a file that leaves the repo, and sets no `data-theme` (`tokens.css` follows `prefers-color-scheme`). Why: the step list and the section rule contradicted each other, and runs chose a hover value, mixed `max-width` with `min-width` and pinned the light theme.
+- **Where:** `visual/layout.md` Marketing section, `visual/motion.md`, `SKILL.md` Standalone HTML row.
+- **Source:** round 3 prompt 5 (2026-10-01).
+
+### Q51 Launch email: rhythm, delivery, preheader
+- **Decision:** Line heights (title 1.25, body 1.6) and vertical gaps (kicker 24 above and 8 below, title 12, block 24) move into `visual-system.json` (`email.line_height`, `email.gap_px`), generate as `--email-*` variables and `EMAIL_LAYOUT`, and `template.ts` reads them. The values are the ones the shell already used, so its output does not change. The only hairline is above the footer. A launch email ships as HTML only (plain-text twin on request), with the subject in `<title>` and the reply, and with no HTML comment, `TODO(idea)` or Guesses inside it. The preheader is a hidden first-child `div` with a stated style. Why: two runs invented gaps and line heights, and the four runs put a subject, a comment or a preheader hack in the file with no rule. Two judges proposed opposite places for the subject: the comment risk (a pasted body) decided it.
+- **Where:** `visual/visual-system.json`, `scripts/generate-tokens.ts`, `apps/api/src/lib/email/template.ts`, `visual/layout.md` Email layout, `verbal/voice-and-tone.md` 5.5b.
+- **Supersedes:** the judge proposals of 28/22/18 pixel line heights and 32/10/16/28 gaps: the shell values win.
+- **Source:** round 3 prompt 4 (2026-10-01).
+
+### Q50 Product microcopy row adds color and typography
+- **Decision:** The row adds `color.md` (the status table gives the hue of a refusal or failure, Q8) and `typography.md` (mono for literal text, such as a details fold). Why: a run read the row exactly and chose a red banner for a refusal, and guessed the fold type.
+- **Where:** `SKILL.md` Microcopy row.
+- **Source:** round 3 prompt 3 (2026-10-01).
+
+### Q49 First-run mark tone comes from its wrapper
+- **Decision:** The pixel mark paints `currentColor`. The caller sets `text-muted-foreground` on the wrapper and passes the mark no color class. Why: a run put the color on the mark itself, and the kit said only `currentColor`.
+- **Where:** `visual/layout.md` States.
+- **Source:** round 3 prompt 2 (2026-10-01).
+
+### Q48 An empty state shows the action once
+- **Decision:** While the page header shows the primary action, the empty state carries the line and no second copy. The empty state reuses the header control only where the header hides it. Why: a run rendered Invite twice on one screen. Q4 said the empty-state action mirrors the header action, and read alone it asks for both.
+- **Where:** `visual/layout.md` States.
+- **Supersedes:** the "mirrors the header action" wording in Q4 where the header action is visible.
+- **Source:** round 3 prompt 1 (2026-10-01).
+
+### Q47 Remove on a row is a destructive kebab item, and the focus heading
+- **Decision:** On `AccessRow`, Remove is a `kebab` item with `variant: 'destructive'` that opens the confirm dialog, shown only to a viewer with the grant. A viewer without the grant sees no item: "hide, do not disable" in States already covers it, and the run that hid it was right. The list heading that takes focus after a removal has `tabIndex={-1}` and may carry `outline-none`. Verified in `access-row.tsx`: the row has `actions` (inline ghost buttons) and `kebab`. A one-item kebab on this row is intended: the row's grid keeps one trailing slot. Why: a run drew a solid red `Button` on every row and logged no guess.
+- **Where:** `visual/layout.md` States and Lists of principals.
+- **Source:** round 3 prompt 1 (2026-10-01).
+
+### Q46 Deck diagram captions are slide copy
+- **Decision:** The caption arrays inside `engine/diagram.tsx` count as slide copy and carry claims. `ChangeRequestDiagram` captions now use `claims.md` rows word for word ("Session work reaches main through a change request.", the per-session isolated machine and branch line, the approved note's change-request line, and the "Nothing merges itself ..." line). The gate slide notes in `decks/security.tsx` drop "main is your live company", "reads the diff", "invisible to main", "That is the only door" and the `kortix.yaml` grant line. Slide 1 notes drop the same live-company and only-way wording. The comment in the diagram names `project.gitops.merge`. Why: a run rendered the banned "main is your live company" through the diagram caption at step 0, because the Deck row covered notes and not captions. This resolves the caption half of Q42 item 9; the audit-row fixture action `cr.merge` in `LedgerDiagram` is untouched.
+- **Where:** `apps/web/src/app/[locale]/presentations/engine/diagram.tsx`, `decks/security.tsx`, `SKILL.md` Deck row.
+- **Supersedes:** the OPEN caption half of Q28 and Q42 item 9.
+- **Source:** round 3 prompt 6 (2026-10-01).
+
+### Q45 Round 1 and 2 freedoms marked intentional
+- **Decision:** These are author choices, not kit rules: the exact wording of an empty-state hint, a viewer variant and a button label inside the section 4 patterns; the placeholder style (`{appName}`) in a string; skipping the host repo workflow (worktree, ponytail, PR) in a scratch run; page elements beyond heading, proof, artifact and call to action, including an eyebrow, a footer and whether a provider is named; the absence of motion or an accent hue on a marketing section; the page title and meta wording inside the title and length rules; reusing the approved hook word for word; whether a post names Kortix; alt text wording, a WebP export and one file per deliverable; group titles and row labels on a mobile screen; accessibility labels; optimistic save, rollback and toast wiring; the choice of CLI examples and extra variants (plural, `--json`); an unquantified market statement from `concepts.md` such as the model cadence; Roobert missing from Electron and proxy pages (D8a); how a styleguide shows `SectionCard`, `List` and `text-md` as banned or non-canonical. Why: judges and runs logged each as a guess, and no judge showed a harm.
+- **Where:** `qa/fresh-agent.md` judge note.
+- **Source:** full judge input, rounds 1 and 2 (2026-10-01).
+
+### Q44 Social voice
+- **Decision:** A post comes from the Kortix account: "we" is the team, no "I" unless the request names a person. Whether a post names Kortix is the author's choice. Why: a run wrote with no pronoun because the account was unknown, and section 1 already sets "we" for the team. The link target uses the placeholder rule in Q41.
+- **Where:** `verbal/voice-and-tone.md` 5.9.
+- **Source:** full judge input, round 1 prompt 7 (2026-10-01).
+
+### Q43 Component routing in `kortix-design-system`
+- **Decision:** The skill gains a "Which component for which state" table: `ProjectPendingScreen`, `Skeleton`, `ErrorState`, `InfoBanner`, `EmptyState`, `AccessRow`, `Field`, toast helpers, `CapabilityPageShell`. `Field` is for every form field, in a panel and in a `Modal` (`secrets-view.tsx` and `access-dialog.tsx` do both). The panel recipe defers to the in-flow color rule (Q11). The dos and the checklist name `CapabilityPageShell` for a new page and one muted line for an empty state. Why: runs used a raw `<label>`, the legacy shell and a forked `EmptyState`, and the skill told them to. All paths in the table exist at this commit. OPEN for the owner of `project-settings-page.tsx`: the reference still builds its panels `bg-popover` on a page, which Q11 rules out.
+- **Where:** `kortix-design-system/SKILL.md`.
+- **Supersedes:** the "Every panel is `bg-popover`" and "`CustomizeSectionWrapper` for a section shell" wording.
+- **Source:** full judge input, round 1 prompts 1 to 3 (2026-10-01).
+
+### Q42 (OPEN) Product debt found by the surface and QA runs
+- **Decision:** Recorded, not fixed here. Each needs an owner.
+  1. iOS input zoom: `Input` is `text-sm` (14px) at every size but `xl`, so iOS Safari zooms on focus, and the viewport now allows pinch zoom. Fix: 16px on touch widths.
+  2. A missing static file returns 500, not 404. Cause, from code and not reproduced against a server: the `middleware.ts` matcher excludes `favicon.ico` and any path ending in `.svg`, `.png`, `.ico`, `.json` and the other asset suffixes, so for a file absent from `public/` the middleware never rewrites to a locale. Next matches the single segment (`favicon.ico`) to `app/[locale]` with `locale = "favicon.ico"`. `app/[locale]/layout.tsx` line 155 calls `notFound()`, and a root layout has no not-found boundary above it, so Next answers 500. Options: drop the suffix exclusions and 404 in the middleware, or add `app/not-found.tsx`. Adding the real `favicon.ico` removed the 500 for that one path.
+  3. Mobile `Switch` has no hit-target rule: `apps/mobile/AGENTS.md` states 44pt for icon buttons only.
+  4. `apps/mobile/AGENTS.md` and `design.md` do not point to the kit. Only the repo `AGENTS.md` names it, and for web.
+  5. `app/[locale]/layout.tsx` line 259 still lists "Kortix – The AI Command Center for Your Company" in the JSON-LD `alternateName` (D1).
+  6. `/design-system` strings in `en.json` still repeat the old `rounded-2xl` and `rounded-full` guidance, and the hero badges ("30+ Components", "OKLCH Colors") are static text. Its new literal English strings need catalog keys.
+  7. The wallpaper registry names the outline wallpaper "Brandmark" (id `brandmark`) in `scripts/generate-wallpapers.mjs`. D6 calls it `brandmark-bg`.
+  8. Marketing `content.ts` strings are translated by an exact-text lookup in `*-translation-keys.generated.ts`, so every string edited in the brand sweep falls back to English until the catalogs regenerate. The other locale catalogs still hold the old text for the keys changed in `en.json`, and `en.json` keeps orphan keys with retired wording.
+  9. `kortix-presentation/SKILL.md` names `apps/web/src/app/presentations/`. The real path is `apps/web/src/app/[locale]/presentations/` (checked 2026-10-01). The skill no longer names `project.cr.merge`, but the engine `diagram.tsx` still does (line 463 comment, line 697 action) and its change-request captions (lines 485 to 490) keep the dropped wording "that grant is itself a change request someone else approves" and "a person reads the diff and merges" (Q28).
+  10. The Electron assets were checked by reading source only. No native render, theme toggle or 720 x 480 check ran.
+  11. The SDK `package.json` description and README line 3 changed. npm shows the old description until the next SDK publish (the `version` field is inert, so no hand bump).
+  12. `bun test` over several directories in one process reported 49 failures in `PreviewImageContent` and `dotm-circular-11` SSR pins. They pass alone. Suspected cross-file mock leakage, not traced.
+- **Where:** `visual/typography.md` (known drift), `visual/layout.md` (mobile), `qa/fresh-agent.md`, this entry.
+- **Source:** surface agents S1 to S7 and the full judge input (2026-10-01).
+
+### Q41 Copy placement and vocabulary from the channel and site copy runs
+- **Decision:** (1) A destination the request omits is a named placeholder for the object (`{{REQUEST_DEMO_URL}}`), on every surface. (2) The docs landing takes Short for the meta description and Standard for the body lead. The About hero, its meta description and the `llms.txt` About entry take the Mission line, word for word. (3) "AI transformation" joins the banned hype list: the old brand guide banned it by name. (4) "experimental" is the status word. "preview" and "beta" are not, except in the sanctioned Companies pitch line, word for word. A status stays out of a tab, nav or button label. (5) Write "Teams chat" for a Teams chat, never "conversation". (6) "workforce" stays allowed: it is a preferred term in the don't-say table. Why: the S1 and S2 runs had no rule for any of the six and chose alone.
+- **Where:** `verbal/voice-and-tone.md` (5.1, section 4, vocabulary, don't-say), `verbal/positioning.md` (surface table).
+- **Source:** surface agents S1 and S2 (2026-10-01).
+
+### Q40 Status chips, banners, spinners and the Badge
+- **Decision:** A filled banner has `border-transparent`. A chip label is `text-foreground`, with the hue on its glyph and tint. A diff counter or git status letter may paint `STATUS_TEXT` (contrast OPEN under J-7). `Badge` has no `color` prop: the 17-hue showcase map is deleted. `update` is `kortix-orange`. `destructive` stays the one red chip variant and still paints red text: debt. Paused and budget-reached states are `kortix-orange`. Badge geometry (`rounded-[5px] py-[0.1rem] text-[0.8rem]`) is recorded as debt with the nearest steps, not allowlisted. A test that pins `animate-spinner-spin` is changed with the code it pins. Why: S4 hit each gap while moving the primitives to tokens.
+- **Where:** `visual/color.md`, `visual/motion.md`, `visual/typography.md` (known drift).
+- **Source:** surface agents S4 and S6 (2026-10-01).
+
+### Q39 App icons, manifests and favicons
+- **Decision:** `favicon.svg` (dark `#121215` mark on a light `#F8F8F8` tile) is the one web icon artwork, for light and dark color schemes. `favicon.ico`, `favicon.png`, `apple-touch-icon.png`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `icon-light-32.png` and `icon-dark-32.png` are rasterized from it. The file list and render rules are in `brandmark.md`. Jay decided this on 2026-10-01 and reverted the white-on-dark-tile set from PR #8567. A Slack or Teams manifest takes the dark `--background` hex. OPEN: a person aligns `manifest.json` `background_color`, `theme_color` and the viewport `themeColor` pair with the token.
+- **Where:** `visual/brandmark.md`, `visual/color.md`.
+- **Supersedes:** "One icon spec is OPEN" for the web files only. The desktop and mobile icons keep their own artwork.
+- **Source:** surface agents S1 and S7 (2026-10-01).
+
+### Q38 Mobile routing and rules
+- **Decision:** The Mobile row names the files a mobile screen needs: `apps/mobile/AGENTS.md` (Loading, Icons, hit target), `settings-list.tsx`, `switch.tsx`. Product data comes from the shipped store or screen, never from the kit, and the agent checks `app/` for an existing screen first. A row that depends on a master switch is hidden while it is off. A mobile loader is `KortixLoader` or `Skeleton`. A group title names its object ("Notification types"), not the person ("Notify me about"). `magic_trick.md` does not apply to a mobile screen. The shipped Notifications screen holds four types (completions, errors, questions, permission requests), a master switch, a sound switch and a "Device settings" link row, all with defaults on. Why: runs invented categories and defaults, disabled rows under a master switch, wrote a first-person group title and read neither mobile doc.
+- **Where:** `SKILL.md` Mobile row, `visual/layout.md`, `visual/motion.md`, `verbal/voice-and-tone.md` section 4, `magic_trick.md`.
+- **Source:** full judge input, prompt 9 (2026-10-01).
+
+### Q37 CLI text comes from the real binary
+- **Decision:** CLI help and error text is quoted from `kortix <command> --help` or `apps/cli/src/commands/<command>.ts`, and the agent says "quoted" or "proposed". Prefixes come from `style.ts`: `✗` error, `!` warning, `✓` success, `▸` note. A missing required secret is a warning with a count, a consequence and a fix command. Help lists a deprecated flag with "Deprecated." and its replacement. A UI path uses "→". Only the landing screen prints the banner. In prose a secret exposure is "egress-enforced", and as a CLI argument it is `enforced`. `kortix secrets share` exists in this tree (`secrets.ts` line 125); a run that read an older checkout missed it. The CLI row adds `claims.md`. CLI output carries no artifact. Why: runs wrote `list` for `ls`, invented flags and values, mixed prefixes and dropped deprecated flags. The shipped missing-secret line uses a spaced em dash: debt, not a precedent.
+- **Where:** `verbal/voice-and-tone.md` 5.4 and vocabulary, `SKILL.md` CLI row, `magic_trick.md`, `qa/fresh-agent.md` (prompt 10 quotes the source).
+- **Source:** full judge input, prompt 10, rounds 1 and 2 (2026-10-01).
+
+### Q36 Marketing section, artifact and claim wording
+- **Decision:** A marketing section is `mx-auto max-w-7xl px-6`, `py-24 md:py-30` (the shipped `/security` page), with stock breakpoints and `calc(var(--spacing) * N)` in plain HTML. A page has one `h1`; a section takes `h2`. An icon is a text glyph or a Phosphor path, never drawn. An artifact must prove its headline: no `allow_all` excerpt under a security headline, and a path in `claims.md` is not an excerpt. A YAML excerpt nests `policy:` and `default_mode:`. A claim keeps its row's words and qualifiers, and rows are never merged. The Marketing row adds `typography.md`, `color.md` and the Enterprise pitch. The section elements beyond heading, proof, artifact and CTA are the page's choice. Why: runs invented container, breakpoint and measure values, opened a section with `h1`, drew an arrow, chose a permissive artifact and merged rows into new claims.
+- **Where:** `visual/layout.md`, `visual/typography.md`, `visual/graphic-elements.md`, `magic_trick.md`, `verbal/claims.md`, `SKILL.md`.
+- **Source:** full judge input, prompt 5, rounds 1 and 2 (2026-10-01).
+
+### Q35 Standalone HTML, the audit and the styleguide
+- **Decision:** `audit.sh` audits `/design-system` (the exclusion is removed). A line that carries `audit:allow <reason>` is skipped: a styleguide data row that names a banned token, or the token block of a page under a CSP. Two page lines and two proxy-page lines carry it. HTML gets a grep check in `SKILL.md` section 6 and a two-screenshot theme check. `tokens.css` gains `--font-sans-system`, `--font-mono-system`, `--tracking-tight` and `--leading-*`, so standalone HTML never types a literal or a Roobert-first stack. A standalone page inlines the `tokens.css` hex in one marked block, maps roles by what the surface is, and inlines the symbol's path data. The styleguide is a marketing-profile page: a mono-uppercase section label is its eyebrow, and light and dark show as the page pane plus a `dark` scope pane. A fixed white ground for the black symbol is a named constant. Why: S3 and S6 ran the audit on a copy to get a result, and hit the token block as a false positive.
+- **Where:** `scripts/audit.sh`, `SKILL.md`, `scripts/generate-tokens.ts`, `visual/color.md`, `visual/typography.md`, `visual/layout.md`, `visual/brandmark.md`.
+- **Supersedes:** the `/design-system/` exclusion in `audit.sh`.
+- **Source:** surface agents S3 and S6 (2026-10-01).
+
+### Q34 Email ships light only, and its values live in the JSON
+- **Decision:** Transactional and launch email ship light only: no `prefers-color-scheme` block, no `color-scheme` meta, one black logo. The email palette, layout, sizes, system font stack and logo URL are generated from `visual-system.json` (key `email`) into `tokens.css` (`--email-*`) and `EMAIL_LAYOUT` in `brand-tokens.generated.ts`, and `template.ts` reads them. `EMAIL_FONT_SANS` drops Roobert. The role map names `--muted-foreground` for muted text (the same value as `--foreground-weak`). An internal notification uses the same shell and the same tagline footer in HTML and plain text. Why: the shipped shell is light only, Gmail ignores `prefers-color-scheme`, the stack began with Roobert although clients cannot load it, and the numbers lived in two guidance files. The hosted logo URL returns 200 (checked with `curl` on 2026-10-01).
+- **Where:** `visual-system.json`, `scripts/generate-tokens.ts`, `apps/api/src/lib/email/template.ts`, `visual/color.md`, `visual/brandmark.md`, `visual/layout.md`, `visual/typography.md`, `verbal/voice-and-tone.md` 5.5.
+- **Supersedes:** the two-logo swap in Q10, the OPEN number move in Q27, and the Roobert-first email stack.
+- **Source:** surface agent S5 and the full judge input, prompt 4 (2026-10-01).
+
+### Q33 QA harness, round 3
+- **Decision:** Fresh agents run with the normal `HOME`. Scratch directories live under `$HOME/.cache/kortix-brand-qa/<run>`, not under `/private/tmp`. The user-level `~/.claude/CLAUDE.md` and Codex's user skill folder still load, and the judge accepts that. The Claude command puts the prompt first and passes `--allowedTools` with `audit.sh` and `Read Write Edit Glob Grep`. The Codex command is `codex exec --skip-git-repo-check --sandbox workspace-write`. Tier B has an explicit file manifest, tested with a dry run on 2026-10-01. Tier A+ adds the brand files, the page source and the CLI source for prompts 5, 8 and 10. Prompt 9 withholds the shipped screen. Why: 9 of 20 round 2 runs failed with "Not logged in", and runs guessed at files the scratch tree lacked.
+- **Where:** `qa/fresh-agent.md`.
+- **Supersedes:** the empty `HOME` in Q21 and the environment-only auth in Q31.
+- **Source:** full judge input, rounds 1 and 2 (2026-10-01).
+
+### Q32 Round 2 freedoms marked intentional
+- **Decision:** These are host choices, not kit rules: the file name and prop shape of a component, fixture data and role names on a `/debug` page, a fake delay in a fixture, scope limited to the prompt (no search, pagination or role editing), where deck copy modules and registry rows (kind, tags, route) live, strings inline in a snapshot with no catalog, a title stored as a segments array, `'use client'` placement, and handoff file names. Why: round 2 runs logged each as a guess and no judge could show a harm.
+- **Where:** `qa/fresh-agent.md` judge note (Q9 list), `visual/layout.md`.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q31 QA harness, round 2
+- **Decision:** Auth under an empty `HOME` comes from environment variables only. The scratch root has no `AGENTS.md` or `CLAUDE.md` in any parent, checked by a loop. Tier B copies `make-interfaces-feel-better`. The `claude` flag is `--allowedTools=...` because the variadic form swallowed the prompt. Why: every Claude run and one Codex run failed on auth, one run read another session's worktree, and one run read a parent `AGENTS.md`. Reads of `magic_trick.md`, `decisions.md`, `audit.sh` and Also-load files are not outside-row reads.
+- **Where:** `qa/fresh-agent.md`, `SKILL.md` section 2.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q30 OG card rules
+- **Decision:** Symbol plus title only, light theme, no artifact and no `TODO(idea)`. The title is the page H1 or nav label. The title face is the system stack until D8a closes (stricter rule wins over "composite Roobert"). Title size is the marketing ceiling. Symbol size and margin stay OPEN under D8b: take the nav logo height, state the numbers. A spec cites token names, never hex. The image model makes a plain plate only. Why: a run hit four conflicts between `magic_trick.md`, `typography.md` and `art-direction.md`, and wrote hex into a Markdown spec.
+- **Where:** `visual/art-direction.md`, `visual/typography.md`, `magic_trick.md`, `SKILL.md` OG row.
+- **Supersedes:** the "share card" wording of the first `magic_trick.md` artifact rule, and the "page title in Roobert" wording in `art-direction.md`.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q29 Social length and delivery
+- **Decision:** X at most 280 characters. The first 210 characters of a LinkedIn post carry the hook. The audience is a technical founder or operator, named under Guesses. One file per platform, plain text, no `TODO(idea)` comment inside it. The closing action is a reply question or "Link in the comments." `claims.md` gets a row for "an agent edits its own configuration and a person approves it", taken from `concepts.md` beat 5. The code path is not re-read: re-verify before a launch. Why: the router row sent the agent to an image-size table, and a run built a paragraph on an unsourced claim.
+- **Where:** `verbal/voice-and-tone.md` 5.9, `verbal/claims.md`, `SKILL.md` Social row.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q28 Deck rules
+- **Decision:** A diagram has four parts at most. A verdict is a `/15` tint with a solid glyph and ink words. A build-step opacity fade is not navigation: the "never animate a keyboard action" rule covers slide navigation only. An opacity-only fade needs no reduced-motion variant. The ghost opacity is the engine's. Notes say "a person approves", never "reads the diff and merges". A slide title about `main` is scoped to session work, and the sanctioned claims row now says "Session work reaches `main` ...". The Deck row adds `voice-and-tone.md` 5.8, `motion.md` and `audit.sh`. The recipe skill is not an entry point. Why: a run failed `audit.sh` on four tints, forked a diagram with a retired caption, and read two conflicting motion rules as "no fade". OPEN for the `kortix-presentation` owner (outside this kit): the engine `ChangeRequestDiagram` caption and the skill still name `project.cr.merge` and the dropped grant wording. A request for "one slide" with no deck named creates a one-slide deck in that skill's registry.
+- **Where:** `visual/layout.md`, `visual/motion.md`, `verbal/voice-and-tone.md` 5.8, `verbal/claims.md`, `SKILL.md` Deck row.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q27 Email layout, font and logo
+- **Decision:** Email uses whole pixels from the shipped shell (520px container, 32px side padding, 8px button radius, button padding 12px 28px, logo `height="22"`), not fractional pixels from the rem scale. The font is the system entries of `--font-sans` only (D8a). The logo URL and height are written inline in `brandmark.md` because a Tier A run has no shell. The layout table said 10px buttons: the shell says 8px, fixed. Why: a run wrote 29.44px paddings, a Roobert-first stack, and guessed the logo height. OPEN: move these numbers into `visual-system.json` (scripts are outside this change).
+- **Where:** `visual/layout.md`, `visual/typography.md`, `visual/brandmark.md`.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q26 Artifact gap protocol
+- **Decision:** With a `TODO(idea)`, the reply states "This is the median. The idea it lacks is: <one line>." The marker goes in Guesses, and in the file only when nobody pastes the file. No synthetic excerpt without a supplied artifact. A microcopy request returns TSX only, with notes in the reply. Why: three runs left the marker as a comment in a pasteable post or skipped the median line, and a run added a second Markdown file beside the TSX.
+- **Where:** `magic_trick.md`, `SKILL.md` rows, `qa/fresh-agent.md` M row.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q25 Copy rules from round 2
+- **Decision:** Agent removal copy gets its own way back. A refused action has no button unless the app has a screen to fix the cause. A new catalog key is `{surface}.{state}.{slot}`. "Machine" appears only inside a sanctioned `claims.md` row. The `computer` row no longer lists laptop, desktop or server (Q20 forbids a machine class). A launch email uses three different sentences for subject, title and button, and a preheader that adds a fact. Hosted URLs and button destinations that the request omits are named placeholders. Why: runs invented each, and the `computer` row itself taught the forbidden list.
+- **Where:** `verbal/voice-and-tone.md`.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q24 State placement, pending action, details fold, disclosure motion
+- **Decision:** `ErrorState size="sm"` sits inside the host's panel. The details fold shows only rows with a value and has no caret when empty. A running action disables its button, sets `aria-busy`, keeps its label and adds no spinner. A `Disclosure` keeps its default transition: `duration` 0 is wrong. The Microcopy row adds `motion.md`. Why: a run set `duration` 0 without reading `motion.md`, and invented placement and pending behavior.
+- **Where:** `visual/layout.md`, `visual/motion.md`, `SKILL.md` Microcopy row.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q23 Shared components are composed, not restyled
+- **Decision:** A new page uses `CapabilityPageShell`. No arbitrary child selector and no slot `className` on a shared component (`EmptyState`, `AccessRow`, shell header). `Button` keeps its size variant: no height override. A variable label may wrap. After a destructive confirm removes a row, focus moves to the list heading. First-run is zero unfiltered items on a successful load of a list the kit names first-run. Every override is listed under Guesses. Why: round 2 runs picked the legacy wrapper and forked the `EmptyState` title and `AccessRow` rows with selectors, and listed none of it. OPEN for the primitive owner: `EmptyState` title weight and ink (Q4).
+- **Where:** `visual/layout.md`, `SKILL.md`.
+- **Supersedes:** the history-based first-run split in Q4.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q22 Round 2 routing
+- **Decision:** A product screen or state skips `magic_trick.md` entirely. Sanctioned reads outside the row: `magic_trick.md`, `decisions.md`, `audit.sh`, Also-load files. An absent Also-load file means the row is complete: no disk search. `references/qa/` is not a job file. Email rows say that no script applies. Why: runs read `magic_trick.md` for a product state, searched the disk for an absent skill, read another session's worktree, and read the QA rubric.
+- **Where:** `SKILL.md` sections 1 and 2.
+- **Source:** fresh-agent QA round 2, 2026-10-01.
+
+### Q21 QA harness isolation
+- **Decision:** Run each fresh agent with an empty `HOME`, no parent `AGENTS.md`, a full tool log, and `audit.sh` allowed. Why: round 1 leaked a user-level skill, an `AGENTS.md` and showed no read order.
+- **Where:** `qa/fresh-agent.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q20 (OPEN) How a person connects a computer
+- **Decision:** No `claims.md` row states the mechanism. Why: a launch email needs one true mechanism line and no code reviewed in this round states it. Until answered: name only the vocabulary-row definition.
+- **Where:** `verbal/claims.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q19 (OPEN) Unsubscribe link and merge tags in a launch email
+- **Decision:** No code sends launch mail. The tool decides tag syntax. Until answered: placeholder under Guesses.
+- **Where:** `verbal/voice-and-tone.md` 5.5b.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q18 Launch email anatomy
+- **Decision:** Add section 5.5b: subject, kicker (noun phrase, no colon), title, lead of 20 words or fewer, artifact, one button, reason-you-get-this note, preheader of 40 to 90 characters. Why: 5.5 targets security mail. Four of six email runs used a transactional tone for a launch.
+- **Where:** `verbal/voice-and-tone.md`, `SKILL.md` Email rows.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q17 New web strings use the catalog
+- **Decision:** A new string goes in `en.json` and is read with `useTranslations`. Why: a run left English inline although the host file used the catalog.
+- **Where:** `verbal/voice-and-tone.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q16 Do not rename a shipped label
+- **Decision:** Keep the shipped label unless the task is about the label. Primary page action is verb plus object. Why: a run proposed renaming "New trigger" inside an empty-state task.
+- **Where:** `verbal/voice-and-tone.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q15 Remove versus Delete, and invite defaults
+- **Decision:** Remove uses the effect-plus-way-back confirmation. "This cannot be undone." is for Delete. Invite is email-only with the lowest-privilege default role. Why: Remove keeps the object. Source for the invite email: `apps/api/src/accounts/email.ts`.
+- **Where:** `verbal/voice-and-tone.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q14 Error copy rules from round 1 prompt 3
+- **Decision:** Start failure verb, expired connection wording, refusal in two parts with two causes, one noun per error, button as next action, "Show details" fold labels. Why: runs invented each; claims.md says a session cannot merge its own change request, so one grant message is wrong for that cause.
+- **Where:** `verbal/voice-and-tone.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q13 Computer versus cloud computer
+- **Decision:** The two nouns name different machines. Never define or contrast one with the other. Why: the `computer` row listed "cloud computer" as banned while the `cloud computer` row names it as sanctioned. Fixed the row to ban only the synonym use.
+- **Where:** `verbal/voice-and-tone.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q12 Static rows carry no transition
+- **Decision:** No `transition-*` class without a hover or selected state. Why: a run put `transition-colors` on rows with nothing to animate.
+- **Where:** `visual/motion.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q11 Bordered list on a page uses `bg-background`
+- **Decision:** Kit wins over a `bg-popover` panel recipe in another skill. `bg-popover` is for floating panels. Why: a run followed `kortix-design-system` and broke the color rule. Debt: the design-system wording still says every panel is `bg-popover` (OPEN for its owner).
+- **Where:** `visual/color.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q10 Email color roles and logo
+- **Decision:** Page, card, border, muted text and button map to named tokens. Logo URL comes from `template.ts`. Ship both PNGs and swap in `prefers-color-scheme`. Why: runs guessed the mapping and the URL.
+- **Where:** `visual/color.md`, `visual/brandmark.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q9 Data wiring is host freedom
+- **Decision:** Prop shapes, types, role names and file placement are not kit rules. Judges ignore them. Why: four runs logged them as guesses.
+- **Where:** `visual/layout.md`, `qa/fresh-agent.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q8 Destructive action source and refusal hue
+- **Decision:** Use the `destructive` variant, never `text-destructive` on another variant. A policy refusal is `kortix-orange`. A failed operation is `kortix-red`. Why: a run overrode the color on a text button, and another guessed the refusal hue.
+- **Where:** `visual/color.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q7 Section page title is `text-xl`
+- **Decision:** `text-2xl` is the detail-view ceiling, not the default. Why: a run read "App ceiling" as permission.
+- **Where:** `visual/typography.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q6 Bare row verb with a named accessible name
+- **Decision:** Allowed when the row names the object. Why: it conflicts with the name-the-object label rule when read alone.
+- **Where:** `visual/layout.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q5 Page-load states
+- **Decision:** Page load before the shell mounts: `ProjectPendingScreen`. Skeleton rows only inside a mounted shell with a known row shape. Failed page load: `ErrorState`. Inline alert: `InfoBanner`. Why: two runs chose differently.
+- **Where:** `visual/layout.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q4 Empty-state details
+- **Decision:** Define first-run, keep the mark as a sibling above `EmptyState size="sm"`, no fork and no new prop, CTA mirrors the header action, viewer sees no button, opacity-only fade needs no reduced-motion branch. Why: runs forked the primitive or dropped the mark. OPEN for the primitive owner: `EmptyState` renders its title `text-foreground font-semibold`, while D4g says one muted line. Do not patch the primitive in a page task.
+- **Where:** `visual/layout.md`, `visual/motion.md`, `verbal/voice-and-tone.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q3 Microcopy deliverable is TSX
+- **Decision:** A request for UI error or empty states returns TSX that renders `ErrorState` or `EmptyState`, not Markdown. Why: Markdown cannot be audited and a run read four unrelated files.
+- **Where:** `SKILL.md` microcopy row.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q2 The product row is read in full
+- **Decision:** The design-system skill adds components. It does not replace a visual file. Why: round 1 runs skipped four of six files and hand-rolled shell, row and panel.
+- **Where:** `SKILL.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### Q1 Product states carry no magic-trick artifact
+- **Decision:** Applies to screens, empty, error, toast, confirm, loading. The artifact rule covers marketing, deck, image, social and launch email. Why: a run added `TODO(idea)` to three error files. Supersedes the "screen" wording of the first magic_trick rule.
+- **Where:** `magic_trick.md`, `SKILL.md`.
+- **Source:** fresh-agent QA round 1, 2026-10-01.
+
+### D8e (OPEN) Founder confirmation of the magic trick
+- **Decision:** Open. The founder has not confirmed `magic_trick.md`. The file is a draft built from `verbal/concepts.md`.
+- **Why:** The router tells every agent to read it first. A first-read file without an owner's confirmation can set a wrong frame for every job.
+- **Where:** `magic_trick.md`, `SKILL.md` section 1, `qa/fresh-agent.md` (row M).
+- **Supersedes:** none.
+- **Source:** brand-kit review 2026-10-01.
+- **Until answered:** follow the rules in the file, add no new idea, and list any gap under Guesses.
+
+### K5 Review fixes to the first kit draft
+- **The Short line is 129 characters:** "Open-source AI Management System: your agents, skills, memory, and connectors in one repo you own. Any model. Self-host or cloud." *Why:* the old line began with "command your agents", which pushes "command" toward the category slot that D1 forbids. *Where:* `verbal/positioning.md`.
+- **"Mark" is a defined generic term, and "wordmark" is a fourth defined term.** The vocabulary is symbol, logo, mark (either asset), wordmark and brandmark-bg. *Supersedes:* the "no other word" line of D6, which banned "mark" and omitted "wordmark". *Where:* `visual/brandmark.md`.
+- **"Account brand icon" replaces "workspace brand icon".** *Why:* "workspace" is a banned noun (`verbal/voice-and-tone.md`).
+- **K3 widens D4e to marketing for the mono-uppercase eyebrow.** When D4e and K3 differ, K3 is newer and wins for marketing. *Where:* `visual/typography.md`.
+- **The J ids replace the hyphenated D ids.** `D-1` to `D-9` became `J-1` to `J-9`. *Why:* `D-8` and `D8` differed by one hyphen and named two different things.
+- **Each status hue carries one meaning in `visual-system.json`.** `kortix-yellow` is "pending". `kortix-blue` is "info, open, in review". *Why:* the file still carried the yellow-as-info mapping that D5 retired.
+- **Rule text in `visual-system.json` follows D4j.** `rounded-lg` is for floating panels. `rounded-sm` covers the segmented chip and menu rows. `shadow-xs` covers the segmented chip. `bg-input` has no new use.
+- **Rules from the deleted skills that were still true came back.** *Where:* `visual/layout.md` (no generic 3-up grid), `visual/motion.md` (no opacity with a large `y` translate), `SKILL.md` (precedence, conflict flagging), `verbal/voice-and-tone.md` (the `kortix-sandbox-agent-server` term, marked internal), `verbal/claims.md` (SAML 2.0 only).
+- **Rules from the deleted skills that were dropped on purpose.** The grant-in-`kortix.yaml` merge wording is false as written, because a dashboard config edit can commit straight to the default branch. The SCIM pagination caveat is fixed in code (`apps/api/src/scim/app.ts:79-90`). The product-marketing personas, objections and switching-dynamics sections stay in K1: no file in this repo reads them.
+- **Each visual file keeps its rationalization table and drops the red-flag list and the checklist.** *Why:* the rules above them already state the same checks.
+- **Source:** brand-kit review 2026-10-01.
+
+### D8a (OPEN) Roobert redistribution license
+- **Decision:** Open. No one has confirmed whether Roobert and Roobert Mono may be served to third-party hosts.
+- **Why:** The files are commercial fonts from Displaay Type Foundry. They are committed to a public repo and served at a public URL. No license document is in the repo.
+- **Where:** `visual/fonts.css` (carries an OPEN comment), `visual/typography.md`.
+- **Supersedes:** none.
+- **Source:** brand-kit audit 2026-10-01.
+- **Until answered:** load Roobert only on Kortix-owned surfaces. Elsewhere use the system fallback and say so in the PR.
+
+### D8b (OPEN) Logo clear space and minimum size
+- **Decision:** Open. No document defines clear space or a minimum size for the symbol or the logo on web or print.
+- **Why:** The audit found no source. Only mobile has numbers: the hero symbol is 30% of the screen width, 88 to 150 points.
+- **Where:** `visual/brandmark.md`.
+- **Supersedes:** none.
+- **Source:** brand-kit audit 2026-10-01.
+- **Until answered:** reuse a size and a margin that already ships. Do not invent numbers.
+
+### D8c (OPEN) Kortix generator or author meta on customer sites
+- **Decision:** Open. No one has decided whether a customer site that an agent builds may carry a Kortix generator or author meta tag.
+- **Why:** The mark must not appear on customer output without a decision. Templates ship with the ASCII wordmark today.
+- **Where:** `visual/brandmark.md`.
+- **Supersedes:** none.
+- **Source:** brand-kit audit 2026-10-01.
+- **Until answered:** add no Kortix meta tag and no mark to customer output.
+
+### D8d (OPEN) Docs site theme
+- **Decision:** Open. The docs site uses the stock Blume theme with Inter. No one has decided to rebrand it or keep it stock.
+- **Why:** Inter is the only place the old "falls back to Inter" claim is true.
+- **Where:** `visual/typography.md`.
+- **Supersedes:** none.
+- **Source:** brand-kit audit 2026-10-01.
+
+### K1 One kit replaces four skills
+- **Decision:** `kortix-brand` is the router and the single source for verbal and visual rules. The skills `brand-guidelines`, `kortix-brand-guidelines`, `comms` and `product-marketing` are deleted after their rules moved into the kit. `kortix-design-system`, `kortix-image`, `kortix-presentation` and `kortix-social` stay. The last three become recipes that load `kortix-brand` first. `/product-marketing.md` is not a file in this repo and no skill reads it.
+- **Why:** The four skills disagreed. `brand-guidelines` listed values that the code did not use (a green, an ink, a dark background and a shadow ladder that do not exist, and a 16px body floor). `comms` and `kortix-brand-guidelines` each claimed to be the single source. `product-marketing` owned a file that does not exist. Two sources for one fact drift.
+- **Where:** `SKILL.md`, `.claude/skills/kortix-brand` (symlink), `kortix-image`, `kortix-presentation`, `kortix-social`, `kortix-design-system`, `CLAUDE.md`, `AGENTS.md`, `apps/web/AGENTS.md`.
+- **Supersedes:** the single-source claims in `comms` and `kortix-brand-guidelines`.
+- **Source:** brand-kit build 2026-10-01 (branch `brand-kit`).
+
+### D7 Kortix-owned skills adopted first-party
+- **Decision:** `brand-guidelines`, `kortix-image`, `kortix-presentation`, `kortix-social`, `product-marketing` and `internal-comms` are no longer pinned to `kortix-ai/skills`. Their entries are removed from `skills-lock.json`.
+- **Why:** The repo owns and edits them. `kortix-presentation` already diverged in #8023. `internal-comms` pins a skill that does not exist in the tree. A lock entry for a skill the team edits is false.
+- **Where:** `skills-lock.json`.
+- **Supersedes:** the lock entries.
+- **Source:** brand-kit build 2026-10-01.
+
+### D6 Logo vocabulary
+- **Decision:** "symbol" is the mark alone. "logo" is the symbol plus the wordmark. "brandmark-bg" is the outline wallpaper. No other word names these. Canonical files live in `apps/web/public/brandkit/`. Never generate or redraw the mark: composite the file. One mark per surface.
+- **Why:** Five vocabularies produced three conflicting rules. The brand kit called the symbol "Brandmark". The `KortixLogo` component calls the lockup `brandmark`. The wallpaper registry uses `brandmark` for a third thing.
+- **Where:** `visual/brandmark.md`.
+- **Supersedes:** the old "Brandmark" and "Logomark" file names in the brand kit.
+- **Source:** brand-kit build 2026-10-01.
+- **Follow-ups (OPEN):** rename the `KortixLogo` variants to `symbol` and `logo` and migrate importers. Rename the wallpaper id `brandmark`. Dedupe the two white logomark files in `apps/web/public`.
+
+### D5 Status hues
+- **Decision:** success, running, connected and merged use `kortix-green`. Error and failed use `kortix-red`. Warning and needs-attention use `kortix-orange`. Pending uses `kortix-yellow`. Info, open and in-review use `kortix-blue`. `kortix-purple` is reserved. Idle is `muted-foreground`. A `kortix-*` accent paints a glyph, a dot, a tint or a chart. The text label beside it stays `foreground` or `muted-foreground`.
+- **Why:** Three sources gave three greens, two reds and three warning hues. Every `kortix-*` accent measures 2.4 to 4.0:1 on a white ground, so it fails AA as body text.
+- **Where:** `visual/color.md`.
+- **Supersedes:** the Tailwind palette classes in `status.tsx`, and the yellow-as-info mapping.
+- **Source:** brand-kit build 2026-10-01.
+- **Related:** J-4 (mobile status parity, resolved), J-7 (light and dark accent pairs for text, open).
+
+### D4a Floating panels open and close with no animation
+- **Decision:** Menus, selects, popovers, tooltips, submenus and the command palette open and close with no animation. Modals, sheets and toasts keep 200 to 300ms. The hover card is the only animated floating panel.
+- **Why:** Radix `Presence` kept each panel mounted until its animate-out ended, so every open and close waited 150 to 200ms. The palette opens dozens of times a day, almost always by keyboard. A submenu opens into the pointer's path.
+- **Where:** `visual/motion.md`.
+- **Supersedes:** the "Often: dropdown, popover, tooltip at 100 to 150ms" row and the "popover scales from the trigger" rule in `kortix-brand-guidelines`.
+- **Source:** Jay Suthar, #7301, #7675, #7067.
+
+### D4b Nested rounding only when concentric
+- **Decision:** A rounded child inside a rounded parent is legal only when concentric: inner radius equals outer radius minus the inset. Otherwise the child is flush.
+- **Why:** The segmented tab chip and the menu rows ship concentric radii. A blanket ban contradicted shipped, correct UI.
+- **Where:** `visual/effects.md`.
+- **Supersedes:** "No nested rounding" in `kortix-brand-guidelines`.
+- **Source:** Jay Suthar, #8286, #8419.
+
+### D4c One bracket-value exception: whole-pixel geometry
+- **Decision:** A bracket value is legal for whole-pixel geometry (a ring, a hairline, device-pixel snapping) when a comment states the arithmetic. Every other bracket value stays banned.
+- **Why:** `--spacing` is `0.23rem`, so `p-0.5` is 1.84px and rounds differently on each side. `p-[2px]` in the tab track gives exactly 1px of track around the chip.
+- **Where:** `visual/layout.md`.
+- **Supersedes:** "There is no exception for matching a design" in `kortix-brand-guidelines`.
+- **Source:** Jay Suthar, #8419.
+
+### D4d Art is a sanctioned layer
+- **Decision:** Paper shaders (grain, neuro, beams), the pixel and dither Kortix mark, dot-matrix glyphs and wallpapers are sanctioned art. Raw hex is legal only inside art modules. Art panes are dark in both themes. An SVG or static fallback paints before WebGL.
+- **Why:** The art ships in the connect modal, the download card and empty states. The hex and gradient bans had no art exception, so the kit contradicted shipped work.
+- **Where:** `visual/graphic-elements.md`, `visual/art-direction.md`, `scripts/audit.sh` (skips named art modules).
+- **Supersedes:** the hex ban and the "Kortix is flat" gradient ban, inside art modules only.
+- **Source:** Jay Suthar, #8491, #7337, #6426.
+
+### D4e The mono-uppercase Badge chip is the one uppercase label in app chrome
+- **Decision:** The mono-uppercase `Badge` chip is the one sanctioned uppercase and mono use as a label in app chrome. Its colors must still come from tokens. Eyebrows elsewhere in app chrome stay banned. Decks may use mono-uppercase eyebrows.
+- **Why:** The chip is a deliberate primitive. The raw palette in `badge.tsx` is tracked debt, and `audit.sh` skipped `components/ui` until this build.
+- **Where:** `visual/typography.md`.
+- **Supersedes:** "No all-caps labels" and "mono only for code" in `kortix-brand-guidelines`, for this chip only.
+- **Source:** Jay Suthar, #6952.
+- **Conflict recorded:** `kortix-presentation` asked for mono-uppercase eyebrows. This entry resolves it: decks yes, app chrome no.
+
+### D4f SessionDotMatrix is the busy mark for session-scoped work
+- **Decision:** `SessionDotMatrix` is the sanctioned busy mark for session-scoped work, for example an approve or deny button while a decision saves. `Loading` is the spinner for everything else. A spinning icon stays banned.
+- **Why:** The approval buttons ship the dot matrix. "Loading is the only spinner" was false at HEAD.
+- **Where:** `visual/motion.md`, `visual/graphic-elements.md`.
+- **Supersedes:** "Loading is the only spinner, no exceptions" in `kortix-design-system`.
+- **Source:** Jay Suthar, #8421.
+- **Debt:** `animate-spin` on refresh icons in `infrastructure-preview.tsx` and `sandbox-url-detector.tsx` (added in #7685). Replace with `Loading`.
+
+### D4g Empty states
+- **Decision:** An empty state is one muted line and an optional hint. No icon tile. No card. The pixel Kortix mark may lead a first-run empty state.
+- **Why:** The command palette replaced nine icon-tile empties with one line. Mobile `design.md` already says no card, border, fill or icon.
+- **Where:** `visual/layout.md`, `kortix-design-system`.
+- **Supersedes:** the icon-plus-headline `EmptyState` mandate.
+- **Source:** Jay Suthar, #7675, #7337.
+
+### D4h Page-level loading is the pending screen
+- **Decision:** Page-level loading is `ProjectPendingScreen` (the pulsing Kortix mark). `Skeleton` is for places where the final shape is known.
+- **Why:** A skeleton of a page the route never renders flashed grey bars.
+- **Where:** `visual/layout.md`, `kortix-design-system`.
+- **Supersedes:** "For page-level loading use Skeleton" in `kortix-design-system`.
+- **Source:** Jay Suthar, #7179, #7263.
+
+### D4i The house icon set
+- **Decision:** `apps/web/src/features/icon/icons` is the house glyph set for shapes Phosphor lacks and for third-party marks. Glyphs use `currentColor`. A new house glyph replaces every Phosphor equivalent in the same change.
+- **Why:** The folder holds 31 files and the skills said "Phosphor only".
+- **Where:** `visual/graphic-elements.md`, `kortix-design-system`.
+- **Supersedes:** "The only icon library is Phosphor" in `kortix-design-system`.
+- **Source:** Jay Suthar, #8491, #8207.
+
+### D4j Inputs and the segmented chip
+- **Decision:** An input is `bg-popover` with a border and `rounded-md`. `variant="popover"` is deprecated and ignored. The segmented chip uses `shadow-xs`.
+- **Why:** The shipped primitives changed. The skills still described `rounded-lg` inputs, `bg-input` wells and `shadow-sm` chips.
+- **Where:** `visual/effects.md`, `kortix-design-system`.
+- **Supersedes:** the input and segmented-control rows in `kortix-brand-guidelines`.
+- **Source:** Jay Suthar, #8286.
+
+### D4k Press scale scales with size
+- **Decision:** A button presses with `active:scale-[0.96]`. A full-width row presses with `active:scale-[0.998]`. A larger element gets a smaller scale.
+- **Why:** 0.96 is the house press (185 uses). A large element moves more pixels at the same scale, so it takes a scale closer to 1.
+- **Where:** `visual/motion.md`, `visual-system.json` (`effects.press`).
+- **Supersedes:** "0.96 only, no exception".
+- **Source:** Jay Suthar, as recorded in the brand-kit brief (D4k). The PR number is not recorded.
+
+### D3 Motion durations compile
+- **Decision:** `duration-fast` is 100ms. `duration-normal` is 150ms. `duration-moderate` is 200ms. `duration-slow` is 300ms. `duration-slower` is 500ms. They compile through `--transition-duration-*` inside `@theme inline`. Bare `ease` is not a utility: never prescribe it.
+- **Why:** Tailwind v4 reads `--transition-duration-*`. `globals.css` defined `--duration-*`, so the five classes emitted no CSS and 105 call sites silently ran at 150ms. Probed against Tailwind 4.3.3: `--transition-duration-fast` emits `.duration-fast`. `--duration-fast` emits nothing.
+- **Where:** `visual/visual-system.json` (`motion.tailwind`), `apps/web/src/app/globals.css` (region "kortix-brand theme"), `visual/motion.md`.
+- **Supersedes:** the dead `--duration-*` tokens as the way to get a utility.
+- **Source:** brand-kit build 2026-10-01. Also recorded as `J-8`.
+- **Note:** `--duration-*` and `--ease-*` stay on `:root`. The `/design-system` page and `apps/mobile/lib/utils/theme.test.ts` read them.
+
+### D2 One values file generates the tokens
+- **Decision:** `visual/visual-system.json` generates three files: `references/visual/tokens.css`, a marker-delimited region of `apps/web/src/app/globals.css`, and marker regions of `apps/mobile/global.css`. A unit test fails on drift.
+- **Why:** Four sources listed four palettes. The `/design-system` page painted wrong swatches. One file with values ends hand-copying.
+- **Where:** `scripts/generate-tokens.ts`, `tests/unit/brand-kit.test.ts`.
+- **Supersedes:** hand-edited token blocks.
+- **Source:** brand-kit build 2026-10-01.
+
+### D1 The category line is "AI Management System"
+- **Decision:** The category is "AI Management System". The tagline is "The open-source AI Management System". "Command center" is a descriptor inside a sentence, never the category, title or meta line. "Autonomous Company Operating System", "open AGI platform", "self-driving companies", "AI Worker" and "Super AI Worker" are retired.
+- **Why:** The live site still shipped "AI command center" as title and meta. The latest founder usage is the 2026-09-29 launch film and the home H1.
+- **Where:** `verbal/positioning.md`, `verbal/voice-and-tone.md`.
+- **Supersedes:** the old comms lines "Autonomous Company Operating System" and the "chatbot to command center" wording.
+- **Source:** #8023 (2026-09-29).
+
+### K2 Kit-build token decisions (generator and CSS)
+Eight decisions made while the generator replaced the hand-written token blocks. Each was proved with zero visual change: 198 of 198 resolved custom properties identical in light and in dark, over 202,391 candidate class strings.
+- **Two generated regions in `globals.css`.** "kortix-brand" holds the `:root` and `.dark` blocks. "kortix-brand theme" sits inside `@theme inline` and holds the type scale, emoji, glyph and motion tokens. Mobile has "mobile-light" and "mobile-dark". The start marker takes an optional id. *Why:* the theme region and the mobile blocks need separate regions. *Where:* `generate-tokens.ts`, `globals.css`, `apps/mobile/global.css`.
+- **`.dark` re-declares a token only when its value differs or when it is a `var()` reference.** *Why:* identical literals inherit from `:root`, so 21 repeats were dead. A `var()` reference must be re-declared so a nested `.dark` subtree re-resolves it.
+- **The legacy `hsl` `--sidebar-*` block is deleted** (`J-9`). *Why:* the `oklch` blocks override all 16 declarations. Resolved diff: 0 changes.
+- **The second `@theme` block (shiny-text, 5s) is deleted** (`J-9`). The first block's `--animate-shiny-text` changes from 8s to 5s. *Why:* the deleted block won the cascade at 5s, so 5s preserves the effective value. `animate-shiny-text` has 0 uses.
+- **Mobile `--destructive-foreground` regenerates with hue 0** (was 60). *Why:* the color is achromatic. 106 of 108 mobile declarations are byte-identical.
+- **`apps/mobile/lib/utils/theme.test.ts` `stripComments` skips quoted strings.** *Why:* the literal `/*` inside an `@source` path paired with the next `*/` and swallowed the `@theme` block. Three tests failed.
+- **The generator also writes `fonts.css` and checks every `hex` field against its `oklch` value.** *Why:* one source for font file names. A mismatch fails at generation time with exit 2.
+- **The kit `tokens.css` carries every semantic, accent, chart and terminal color for both themes in hex.** Dark applies through `[data-theme=dark]` and through `prefers-color-scheme` unless `[data-theme=light]` is set. *Why:* portable HTML, email and OG surfaces cannot import `apps/web` CSS.
+- **Source:** brand-kit build 2026-10-01. Also recorded as `J-9`.
+
+### K3 Kit-build guidance decisions
+- **Marketing and decks may set a mono-uppercase eyebrow, one per section, at `text-xs`.** *Why:* the homepage and the deck engine ship it. D4e allows decks. The kit extends it to marketing for the same reason. *Where:* `visual/typography.md`. *Source:* brand-kit build 2026-10-01.
+- **A status tint is `kortix-*` at 15% opacity. The glyph takes the solid token.** *Why:* 15% is the majority value and Jay's #8491 "New" badge uses it. *Where:* `visual/color.md`.
+- **Roobert loads only on Kortix-owned surfaces** until D8a closes. *Where:* `visual/typography.md`.
+- **Product nouns (session, repository, sandbox) are set in Roobert in running text, not in mono.** Identifiers (`session_id`, a path) are mono. *Why:* `comms` called them common nouns and the old brand skill set them in mono. The product shows plain words. *Where:* `visual/typography.md`.
+- **Managed model lineups name open-weight models only.** Never present OpenAI or Anthropic models as Kortix-managed. *Why:* standing founder decision from 2026-09 (memory entry "Managed lineup = open-weight only"). No code file states it. *Where:* `verbal/claims.md`.
+- **The old `comms` skill had five stale facts.** The corrections are in `verbal/claims.md` section 5 (secret exposure default, channel enum, subscription providers, secret audience, merge capability name).
+- **Share cards use one template:** the symbol, the page title in Roobert, black and white, 1200 by 630. *Why:* every page shared one generic banner and `/api/og/template` is off-brand. *Where:* `visual/art-direction.md`.
+- **Social video captions use the type ladder and one accent.** *Why:* `kortix-social` asked for a bold outlined sans-serif and a second color, which breaks the one-accent and weight rules. *Where:* `visual/art-direction.md`.
+- **No decorative gradient outside an art module.** A fade to `transparent` at a scroll edge is legal. *Why:* "Kortix is flat." The GitHub social preview wordmark uses a gradient and is off-brand. *Where:* `visual/effects.md`.
+- **The `KortixAsterisk` does not spin.** Use the `kortix-bullet-flow` animation when it must move. *Why:* D4f bans spinning icons. *Where:* `visual/graphic-elements.md`.
+- **Source:** brand-kit build 2026-10-01.
+
+### K4 Open questions found by the kit build (OPEN)
+- **J-4.** Resolved: web status uses `kortix-green` and `kortix-orange`; mobile semantic status aliases these accents.
+- **J-5.** Mobile keeps stock spacing (decided). It also keeps stock type (`text-xs` is 12px on mobile, 13px on web) and stock radius (`rounded-xl` 12px against 14px). Decide whether type and radius follow web.
+- **J-6.** `text-md` sets line height with a denominator of 0.9375 against a 0.9rem size (21.12px, not 22px). Fix the denominator or delete `text-md` (8 uses). Until then add no use.
+- **J-7.** `kortix-*` accents are theme-invariant and measure 2.4 to 4.0:1 on white. Decide on light and dark pairs for text use.
+- **CLI banner.** The ASCII "KORTIX" banner ignores `NO_COLOR` and ships inside customer-site templates. Decide whether it is a sanctioned treatment.
+- **App icons.** The favicon, mobile icon and desktop icon do not match. One icon spec is OPEN.
+- **Outlined `Card`.** It ships `rounded-xl` and a `border-border/60`. Both conflict with `rounded-md` and one border color.
+- **Source:** brand-kit build 2026-10-01.
+
+### J-4 Mobile status parity
+- **Decision:** Alias mobile success and warning to `kortix-green` and `kortix-orange`, matching web status.
+- **Why:** Web status now uses brand accents; the former mobile emerald and amber shades drift from the current status palette.
+- **Where:** `visual/visual-system.json` (`color.status_mobile_only`), `visual/color.md`.
+- **Supersedes:** the open J-4 decision and mobile Tailwind shade mapping.
+- **Source:** KRTX-398 status parity regression, 2026-10-01.
+
+### J-5 (OPEN) Mobile type and radius
+- **Decision:** Open. See the J-5 bullet in K4.
+- **Why:** Mobile keeps stock type and radius. `text-xs` is 12px on mobile and 13px on web.
+- **Where:** `visual/visual-system.json` (`documented_differences`).
+- **Supersedes:** none.
+- **Source:** `visual-system.json` `J-5`.
+
+### J-6 (OPEN) The `text-md` line height
+- **Decision:** Open. See the J-6 bullet in K4. Add no new use of `text-md`.
+- **Why:** The denominator is 0.9375 against a 0.9rem size.
+- **Where:** `visual/typography.md`.
+- **Supersedes:** none.
+- **Source:** `visual-system.json` `J-6`.
+
+### J-7 (OPEN) Light and dark accent pairs for text
+- **Decision:** Open. See the J-7 bullet in K4. Paint accents on glyphs, dots, tints and charts only.
+- **Why:** Every `kortix-*` accent measures 2.4 to 4.0:1 on white.
+- **Where:** `visual/color.md`.
+- **Supersedes:** none.
+- **Source:** `visual-system.json` `J-7`.
+
+### J-8 Duration tokens compile
+- **Decision:** Same decision as D3.
+- **Where:** `visual/visual-system.json` (`motion.tailwind`).
+- **Source:** `visual-system.json` `J-8`.
+
+### J-9 Dead CSS removed
+- **Decision:** Same decision as K2: the legacy `hsl` `--sidebar-*` block and the second shiny-text `@theme` block are deleted.
+- **Where:** `apps/web/src/app/globals.css`.
+- **Source:** `visual-system.json` `J-9`.
+
+### E1 The press value is 0.96, not 0.97
+- **Decision:** The house press value is `active:scale-[0.96]`.
+- **Why:** 169 uses against 21 for 0.97 when `kortix-brand-guidelines` was written. The count is 185 on 2026-10-01.
+- **Where:** `visual/motion.md`.
+- **Supersedes:** the `0.97` value in an earlier `kortix-design-system`.
+- **Source:** `kortix-design-system` "Errata", moved here on 2026-10-01.
+
+### E2 The elevation ladder did not exist
+- **Decision:** `shadow-*` renders the stock Tailwind ladder. The custom four-sided soft shadow ladder that `kortix-design-system` described through August 2026 does not exist, and the shadow table in `brand-guidelines` was also invented. The semantics (which step for which surface) hold.
+- **Why:** `grep -an "shadow-" apps/web/src/app/globals.css` returned exactly one line, `--shadow-liquid-glass`. Verified at HEAD on 2026-10-01 (brand-kit audit).
+- **Where:** `visual/effects.md`, `visual/visual-system.json` (`elevation.source`).
+- **Supersedes:** the "Elevation ladder" and shadow tables in `kortix-design-system` and `brand-guidelines`.
+- **Source:** `kortix-design-system` "Errata", moved here on 2026-10-01.
+
+---
+
+## 2026-09-30
+
+### J-2 Dark sidebar row is surface-2
+- **Decision:** Dark `--sidebar-row` is surface-2, one step above light. Recorded in full under #8421 below.
+- **Source:** `visual-system.json` `J-2`.
+
+### #8421 Palette, tile and busy-mark decisions
+- **Decision:** Dark `--sidebar-row` is surface-2, one step above light. A control on a filled row goes one more step up. The connector handshake Kortix tile is `bg-background` with `ring-border` (not an inverted `bg-foreground` tile). A tile has one boundary: a fill or a hairline, never both. A drawn mark does not fill its tile, so it takes the hairline. The approval buttons show the session busy mark while a decision saves.
+- **Why:** Surface-1 on the dark canvas measured 1.07:1 and did not read as a fill. Surface-2 measures 1.15:1. The row masks its truncated title, so a translucent hover punched a hole (#7067). A border on top of a filled tile is a second boundary the design system does not draw (#7105).
+- **Where:** `visual/color.md`, `visual/graphic-elements.md`, `visual-system.json` (`J-2`), `apps/mobile/design.md`.
+- **Supersedes:** the inverted Kortix tile on mobile (#8414 made the same change) and the translucent sidebar hover.
+- **Source:** Jay Suthar, #8421 (a92fcabd6d), #8414 (e37a02e2f4), #7105, #7067.
+
+---
+
+## 2026-09-29
+
+### #8023 Launch film as code
+- **Decision:** The launch film is a route that renders to MP4 (`/presentations/film/launch`). It uses the marketing motion column, stretched for a time axis (`kortix-presentation`, `references/films.md`). The brief records it as the latest founder use of the D1 category line.
+- **Why:** Founder usage on 2026-09-29. Presentations are code (memory entry "Presentations are code, not pptx").
+- **Where:** `kortix-presentation`, `references/films.md`, `visual/motion.md`.
+- **Supersedes:** none.
+- **Source:** #8023 (48a096f1bf).
+
+---
+
+## 2026-06-19
+
+### J-1 Neutral ramp from the Framer reference
+- **Decision:** Hierarchy comes from surface lift, and blue is a signal only. Light mirrors each dark surface's lift distance from the canvas.
+- **Why:** `globals.css` header comment for the neutral block.
+- **Where:** `visual/color.md`, `visual/visual-system.json`.
+- **Supersedes:** the older stock shadcn ramp.
+- **Source:** Jay Suthar, b70f773bfd.
+
+---
+
+## Undated
+
+### J-3 (recorded from `visual-system.json`) Emoji and glyph palettes are two families
+- **Decision:** Emoji hues derive from the glyph and stay stable. Glyph colors are user-chosen.
+- **Why:** Recorded in `globals.css` at the emoji and glyph tokens.
+- **Where:** `visual/visual-system.json`.
+- **Supersedes:** none.
+- **Source:** `visual-system.json` `J-3`.

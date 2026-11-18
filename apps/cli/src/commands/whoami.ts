@@ -1,0 +1,337 @@
+import type { DefaultProjectRef } from '@kortix/shared/host-config';
+import { type Auth, loadAuth, loadAuthForHost } from '../api/auth.ts';
+import { ApiError, clientFromAuth } from '../api/client.ts';
+import { activeHostEntry, defaultProject, getHost, listHosts } from '../api/config.ts';
+import type { AccountMembership, MeResponse } from '../api/types.ts';
+import { takeFlags } from '../command-argv.ts';
+import { takeFlagBool, takeFlagValue, tokenRejectedLine } from '../command-helpers.ts';
+import { C, help, status } from '../style.ts';
+import { NO_WORKSPACE_LINE } from '../api/no-workspace.ts';
+import { boundWorkspaceId, listWorkspaceRowsReport } from '../project-bind.ts';
+
+const HELP = help`Usage: kortix whoami [options]
+
+Print the currently authenticated user + default workspace on the
+selected host.
+
+Shortcut for the active host — same as \`kortix hosts whoami\`. Use
+\`kortix hosts whoami <name>\` to probe a different instance.
+
+Options:
+  --host <name>     Probe a specific host (default: active).
+  --json            Machine-readable JSON output.
+  --token-only      Print only the active token context.
+  -h, --help        Show this help.
+`;
+
+/** The most memberships `whoami --json` lists; the rest is a count (`accounts_total`). */
+export const WHOAMI_ACCOUNTS_CAP = 50;
+
+/** The serialized-bytes ceiling of the whole `--json` output, inside the MCP
+ *  tool's 45 000-byte stdout capture (`STDOUT_CAP`, apps/api/src/mcp/cli.ts):
+ *  a capture cut at the cap is not valid JSON at all. Names are UTF-8
+ *  multi-byte, so the widest valid one (255 astral chars, the DB's
+ *  varchar(255)) is ~1.3 kB on its own — a count cap alone does not bound it. */
+export const WHOAMI_JSON_MAX_BYTES = 40_000;
+
+/** The accounts list for `--json`: the active account first, then the rest,
+ *  capped at WHOAMI_ACCOUNTS_CAP entries. */
+export function boundedAccounts(
+  accounts: AccountMembership[],
+  active: AccountMembership | undefined,
+): AccountMembership[] {
+  const ordered = accounts.length && active ? [active, ...accounts.filter((a) => a.account_id !== active.account_id)] : accounts;
+  return ordered.slice(0, WHOAMI_ACCOUNTS_CAP);
+}
+
+/** The exact `--json` output text (`emitJson`'s format), with the accounts list
+ *  bounded twice over: at most WHOAMI_ACCOUNTS_CAP entries (active first) and
+ *  within WHOAMI_JSON_MAX_BYTES serialized. A list cut by either bound reports
+ *  `accounts_total` (the full membership count) and always keeps the active
+ *  account. */
+export function renderWhoamiJson(
+  me: MeResponse,
+  auth: Auth,
+  resolvedHost: string | null,
+  active: AccountMembership | undefined,
+  def: DefaultProjectRef | null,
+): string {
+  const payload: {
+    host: string | null;
+    url: string;
+    user_id: string;
+    user_email: string | null;
+    workspace_id: string | null;
+    account_id: string | null;
+    account: AccountMembership | null;
+    accounts: AccountMembership[];
+    token_context: MeResponse['token_context'] | null;
+    default_project: DefaultProjectRef | null;
+    accounts_total?: number;
+  } = {
+    host: resolvedHost ?? null,
+    url: auth.api_base,
+    user_id: me.user_id,
+    user_email: me.email || null,
+    workspace_id: boundWorkspaceId(me) ?? def?.project_id ?? null,
+    account_id: active?.account_id ?? auth.account_id ?? null,
+    account: active ?? null,
+    accounts: boundedAccounts(me.accounts, active),
+    token_context: me.token_context ?? null,
+    default_project: def,
+  };
+  // A cut list (by entry count or by bytes) names the full membership count;
+  // a full list leaves the field off. The field is part of the measured text:
+  // it is in place before every size measurement, so the ceiling holds on the
+  // whole payload, not on everything but the last field.
+  const total = me.accounts.length;
+  const cut = () => void (total > payload.accounts.length && (payload.accounts_total = total));
+  cut();
+  let text = JSON.stringify(payload, null, 2);
+  while (
+    new TextEncoder().encode(text).length > WHOAMI_JSON_MAX_BYTES &&
+    payload.accounts.length > 1
+  ) {
+    payload.accounts.pop();
+    cut();
+    text = JSON.stringify(payload, null, 2);
+  }
+  return text;
+}
+
+export async function runWhoami(argv: string[]): Promise<number> {
+  const flags = takeFlags(argv, HELP, (rest) => ({
+    host: takeFlagValue(rest, ['--host']),
+    json: takeFlagBool(rest, ['--json']),
+    tokenOnly: takeFlagBool(rest, ['--token-only']),
+  }));
+  if (typeof flags === 'number') return flags;
+  return performWhoami(flags);
+}
+
+/**
+ * `kortix token` (KRTX-1802): the whoami command's token-only view under its
+ * own name, with its own --help. Bare `kortix token` prints exactly what
+ * `kortix whoami --token-only` prints.
+ */
+const TOKEN_HELP = help`Usage: kortix token [options]
+
+Print only the active token context on the selected host: the kind of
+credential in use and its workspace/session/agent grants — never the
+secret value itself. Same as \`kortix whoami --token-only\`.
+
+Options:
+  --host <name>     Read the token context of a specific host (default: active).
+  --json            Print the full identity JSON instead (same as \`kortix whoami --json\`).
+  --token-only      Accepted for symmetry with \`kortix whoami --token-only\` (this
+                    command is the token-only view).
+  -h, --help        Show this help.
+`;
+
+export async function runToken(argv: string[]): Promise<number> {
+  const flags = takeFlags(argv, TOKEN_HELP, (rest) => ({
+    host: takeFlagValue(rest, ['--host']),
+    json: takeFlagBool(rest, ['--json']),
+    // Symmetry with `kortix whoami --token-only`; this command IS the
+    // token-only view, so the flag changes nothing.
+    tokenOnly: takeFlagBool(rest, ['--token-only']),
+  }));
+  if (typeof flags === 'number') return flags;
+  return performWhoami({ ...flags, tokenOnly: !flags.json });
+}
+
+interface PerformWhoamiOptions {
+  /** Probe a specific host (default: active). */
+  host?: string;
+  /** Machine-readable JSON output. */
+  json: boolean;
+  /** Print only the active token context. */
+  tokenOnly: boolean;
+}
+
+/**
+ * Shared whoami implementation used by both the top-level `kortix whoami`
+ * alias and the `kortix hosts whoami` subcommand. Resolves the identity
+ * for the named host (default: active) and renders it (human, JSON, or
+ * token-only).
+ */
+export async function performWhoami(opts: PerformWhoamiOptions): Promise<number> {
+  const auth = opts.host ? loadAuthForHost(opts.host) : loadAuth();
+  if (!auth?.token) {
+    if (opts.host) {
+      process.stderr.write(
+        `${status.err(`Host "${opts.host}" is not logged in.`)} Run ` +
+          `${C.cyan}kortix hosts login ${opts.host}${auth ? ` --api '${auth.api_base.replaceAll("'", "'\\''")}'` : ''}${C.reset}.\n`,
+      );
+    } else {
+      process.stderr.write(`${status.err('Not logged in. Run `kortix login`.')}\n`);
+    }
+    return 1;
+  }
+
+  let me: MeResponse;
+  try {
+    me = await clientFromAuth(auth).get<MeResponse>('/me');
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      process.stderr.write(`${status.err(tokenRejectedLine(err.message))}\n`);
+      return 1;
+    }
+    process.stderr.write(`${status.err((err as Error).message)}\n`);
+    return 1;
+  }
+
+  const resolvedHost = opts.host ?? activeHostEntry().name;
+  const active = me.accounts.find((a) => a.account_id === auth.account_id) ?? me.accounts[0];
+  // A named-host probe reports that host's own default, never another host's.
+  const def = opts.host ? (getHost(opts.host)?.default_project ?? null) : defaultProject();
+
+  if (opts.json) {
+    whoamiJson(me, auth, resolvedHost, active, def);
+    return 0;
+  }
+  if (opts.tokenOnly) {
+    whoamiTokenOnly(me);
+    return 0;
+  }
+  whoamiHuman(me, auth, resolvedHost, active, def, await hasAnyWorkspace(auth, me, def));
+  return 0;
+}
+
+/**
+ * Tell "pick one" apart from "none exists" from `/accounts/me` alone: a bound
+ * credential, a default, or a membership that names its workspace all mean
+ * one exists. Only memberships that name none (an account with no project,
+ * or several older projects) need the list read, and a failed read never
+ * claims "none".
+ */
+async function hasAnyWorkspace(auth: Auth, me: MeResponse, def: DefaultProjectRef | null): Promise<boolean> {
+  if (boundWorkspaceId(me) || def) return true;
+  if (me.accounts.length === 0) return false;
+  if (me.accounts.some((a) => a.workspace_id)) return true;
+  // An older server reports no workspace_id at all: an account is enough.
+  if (me.accounts.every((a) => a.workspace_id === undefined)) return true;
+  try {
+    const report = await listWorkspaceRowsReport(auth, undefined, me);
+    return report.rows.length > 0 || report.failed.length > 0;
+  } catch {
+    return true;
+  }
+}
+
+/** The machine-readable rendering (`--json`): the raw identity payload. */
+function whoamiJson(
+  me: MeResponse,
+  auth: Auth,
+  resolvedHost: string | null,
+  active: AccountMembership | undefined,
+  def: DefaultProjectRef | null,
+): void {
+  // The payload is bounded in full (renderWhoamiJson): whoami is an identity
+  // answer, not an account listing, and a payload that grows with membership
+  // count breaks the machines that read it (the MCP tool's whole-reply budget,
+  // 2026-11-09 release gate).
+  process.stdout.write(`${renderWhoamiJson(me, auth, resolvedHost, active, def)}\n`);
+}
+
+/** The `--token-only` rendering: just the active token's context block. */
+function whoamiTokenOnly(me: MeResponse): void {
+  const ctx = me.token_context;
+  const { kind, details } = renderTokenContext(ctx, 'user token');
+  process.stdout.write(`\n  ${C.bold}${kind}${C.reset}\n${details}`);
+  const permissions = ctx?.kortix_permissions ?? ctx?.kortix_cli;
+  if (permissions != null) {
+    process.stdout.write(`  ${C.dim}permissions ${C.reset}${formatGrant(permissions)}\n`);
+  }
+  if (ctx?.env != null) {
+    process.stdout.write(`  ${C.dim}env       ${C.reset}${formatGrant(ctx.env)}\n`);
+  }
+  process.stdout.write('\n');
+}
+
+/** The default human rendering: identity, workspace, then the token context. */
+function whoamiHuman(
+  me: MeResponse,
+  auth: Auth,
+  resolvedHost: string | null,
+  active: AccountMembership | undefined,
+  def: DefaultProjectRef | null,
+  hasWorkspace = me.accounts.length > 0,
+): void {
+  process.stdout.write(`\n  ${C.bold}${me.email || me.user_id}${C.reset}\n`);
+  if (me.email) {
+    process.stdout.write(`  ${C.dim}email     ${C.reset}${me.email}\n`);
+  }
+  process.stdout.write(`  ${C.dim}user_id   ${C.reset}${me.user_id}\n`);
+  const bound = boundWorkspaceId(me);
+  if (bound) {
+    // A workspace key, session or agent token reaches one workspace.
+    const owner = me.accounts.find((a) => a.workspace_id === bound);
+    const label = owner?.name ? `${owner.name} ${C.faded}(${bound}, ${owner.role ? `${owner.role}, ` : ''}bound)${C.reset}` : `${bound} ${C.faded}(bound)${C.reset}`;
+    process.stdout.write(`  ${C.dim}workspace ${C.reset}${label}\n`);
+  } else if (!hasWorkspace) {
+    // A new user belongs to no workspace: say how to get one.
+    process.stdout.write(`  ${C.dim}workspace ${C.reset}${C.dim}${NO_WORKSPACE_LINE}${C.reset}\n`);
+  } else if (def) {
+    const role = active && active.account_id === def.account_id ? `${active.role}, ` : '';
+    process.stdout.write(
+      `  ${C.dim}workspace ${C.reset}${def.name || def.project_id} ${C.faded}(${role}default)${C.reset}\n`,
+    );
+  } else {
+    process.stdout.write(
+      `  ${C.dim}workspace ${C.reset}${C.dim}none selected. Pick one with ${C.reset}${C.cyan}kortix workspaces use${C.reset}\n`,
+    );
+  }
+  if (me.accounts.length > 1 && def && !bound) {
+    process.stdout.write(
+      `  ${C.dim}switch workspace with ${C.reset}${C.cyan}kortix workspaces use${C.reset}\n`,
+    );
+  }
+  process.stdout.write(
+    `  ${C.dim}host      ${C.reset}${resolvedHost ?? '—'} ${C.faded}(${auth.api_base})${C.reset}\n`,
+  );
+  const ctx = me.token_context;
+  if (ctx?.project_id || ctx?.session_id || ctx?.agent) {
+    const { kind, details } = renderTokenContext(ctx, 'token');
+    process.stdout.write(`  ${C.dim}token     ${C.reset}${kind}\n${details}`);
+  }
+  const totalHosts = listHosts().length;
+  if (totalHosts > 1) {
+    process.stdout.write(
+      `  ${C.dim}${totalHosts} hosts configured — list with \`kortix hosts ls\`${C.reset}\n`,
+    );
+  }
+  process.stdout.write('\n');
+}
+
+/**
+ * The token-kind label and the workspace/session/agent/connectors detail lines
+ * that the `--token-only` block and the human summary both render.
+ *
+ * `fallbackKind` exists because the two renderings drifted before they were
+ * shared: with no kind in the token context, `--token-only` says `user token`
+ * while the human summary's token line says just `token`. Byte-identical
+ * output pins them apart, so each caller keeps its own spelling.
+ */
+function renderTokenContext(
+  ctx: MeResponse['token_context'],
+  fallbackKind: string,
+): { kind: string; details: string } {
+  const kind = ctx?.session_id
+    ? 'session token'
+    : ctx?.project_id
+      ? 'workspace token'
+      : ctx?.auth_type || fallbackKind;
+  let details = '';
+  if (ctx?.project_id) details += `  ${C.dim}workspace ${C.reset}${ctx.project_id}\n`;
+  if (ctx?.session_id) details += `  ${C.dim}session   ${C.reset}${ctx.session_id}\n`;
+  if (ctx?.agent) details += `  ${C.dim}agent     ${C.reset}${ctx.agent}\n`;
+  if (ctx?.connectors != null) {
+    details += `  ${C.dim}connectors ${C.reset}${formatGrant(ctx.connectors)}\n`;
+  }
+  return { kind, details };
+}
+
+function formatGrant(value: string[] | 'all'): string {
+  return value === 'all' ? 'all' : value.length ? value.join(', ') : 'none';
+}

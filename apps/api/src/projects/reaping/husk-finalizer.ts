@@ -1,0 +1,306 @@
+/**
+ * Close an orphaned turn from the CONTROL PLANE.
+ *
+ * A turn ends only when the runtime reports its end. A killed model call or a
+ * lost end event reports nothing, so the last assistant message stays open
+ * and every client streaming that root spins forever. The daemon's OpenCode
+ * adapter (since deleted) cleaned this up ONLY on its own boot. A box that
+ * never restarts keeps its husk forever, and the reaper meanwhile deletes the
+ * turn record that was the last evidence anything was ever running. This
+ * module is the same finalize, reachable from the reaper pass.
+ *
+ * `/kortix/abort` cannot be used per-turn: it interrupts the PINNED runtime
+ * session and ignores the session the caller asked about, which is a
+ * different root than a husk left by a secondary session. The abort here is
+ * issued against the turn's own root (`POST /kortix/runtime/sessions/:id/abort`).
+ *
+ * THE ABORT IS ROOT-SCOPED, THE EVIDENCE IS MESSAGE-SCOPED. Every prompt of a
+ * session runs on ONE runtime root (extractTurnIdentity reads it from the
+ * request path), and `metadata.activeTurns` deliberately holds one record per
+ * prompt, so a root can carry a husk AND a live turn at the same time. The
+ * reaper's terminal observation is about ONE message, while a newer user
+ * message on the same root may already be running. Aborting the root on that
+ * evidence would kill the newer, live answer and stamp it "Interrupted". This
+ * module therefore aborts only when the open assistant message is provably the
+ * answer to THIS record's `messageId` (its `reply_to` in the session log).
+ *
+ * Never throws, and never fabricates: an unreadable transcript returns
+ * 'unreadable' rather than terminal evidence, and the abort is only ever
+ * reported as 'finalized' after a post-condition read finds THAT message and
+ * sees it closed. "The target is no longer the last message" and "the root is
+ * empty" are not that proof, and are reported 'unconfirmed'.
+ *
+ * Every read is tail-bounded (READ_MESSAGE_LIMIT) — this runs across the
+ * provider ingress on a ~20s pass, not over localhost like the daemon's copy.
+ *
+ * WHY NOT `GET /session/status`? The box still serves it, and it is cheaper
+ * than a log read, but it answers a DIFFERENT question. Its
+ * body is `{ [sessionID]: { type: 'idle' | 'busy' | 'retry' } }` — one verdict
+ * per ROOT, with no message in it. This module is message-scoped by
+ * construction (see the paragraph above): a root can hold a husk AND a live
+ * turn at once, and `busy`/`idle` cannot say which of the two it is talking
+ * about. Worse, the post-condition after the abort is the claim "THIS message
+ * is now closed", and a root-level `idle` is exactly the reading that a
+ * truncated or pushed-out target would also produce — the false 'finalized'
+ * this module exists to avoid. `/session/status` would replace proof with a
+ * guess, so the transcript read stays.
+ */
+
+import { resolveSandboxIngress, resolveServiceKey } from '../../sandbox-proxy/backend';
+import {
+  KORTIX_USER_CONTEXT_HEADER,
+  encodeKortixUserContext,
+} from '../../shared/kortix-user-context';
+import { sandboxRuntimeRequestHeaders } from '../sandbox-fetch';
+import { runtimeVerbPaths } from '../session-lifecycle/runtime-fetch';
+
+export type HuskFinalizeOutcome = 'finalized' | 'not_husk' | 'unreadable' | 'unconfirmed';
+
+export interface HuskFinalizeTarget {
+  sandboxId: string;
+  externalId: string;
+  runtimeSessionId: string;
+  /**
+   * The client-minted user message THIS turn record owns
+   * (StoredSandboxTurn.messageId). Without it no open assistant message on the
+   * root can be attributed to this turn, and nothing is aborted.
+   */
+  messageId: string | null;
+}
+
+export interface HuskFinalizeOptions {
+  /** Settle window between the two reads. Tests pass 0. */
+  settleMs?: number;
+}
+
+/** The daemon's control port. */
+const DAEMON_PORT = 8000;
+
+/** Bound on one session-log read across the provider ingress. */
+const READ_TIMEOUT_MS = 5_000;
+
+/**
+ * How many TRAILING messages each read asks for.
+ *
+ * The log route returns every message together with its blocks — all tool
+ * output included — and `sandboxRuntimeRequestHeaders` forces
+ * `Accept-Encoding: identity` (sandbox-fetch.ts), so an unbounded read drags
+ * the entire conversation uncompressed across the provider ingress under
+ * READ_TIMEOUT_MS, up to three times per husk, on every ~20s reaper pass. That
+ * fails preferentially on long sessions — the exact population this module
+ * exists for — and box-reaper.ts clears the record regardless, so the husk is
+ * never closed and never retried.
+ *
+ * Four is the whole need: the target turn's assistant message, its user parent,
+ * and one newer turn (user + assistant) that may land between the abort and the
+ * post-condition read. Anything older than that window cannot be the root's
+ * last message, so it can never be an abortable husk.
+ *
+ * `limit` RETURNS THE TRAILING MESSAGES: with no `after_seq`, the daemon's
+ * `readLog` (kortixd `harness/pi/turns.ts`) answers the newest `limit`
+ * messages, oldest first.
+ *
+ * The window is additionally a size bound only — `inspectRoot` reads positions
+ * out of whatever list comes back, so a server that ignored `limit` would
+ * change the transfer, not the verdict.
+ */
+const READ_MESSAGE_LIMIT = 4;
+
+/** Bound on the abort call across the provider ingress. */
+const ABORT_TIMEOUT_MS = 10_000;
+
+/**
+ * The settle window the OpenCode daemon's boot-time finalize used, for the same
+ * reason: an open assistant message reads identically whether nobody is writing it or it is
+ * about to complete. Waiting separates the two — nothing writes an orphan, so
+ * it is still open a moment later, while a live turn has finished. Aborting
+ * without this window ends healthy answers and labels them "Interrupted".
+ */
+const HUSK_SETTLE_MS = 2_000;
+
+/**
+ * Reach the box the same way `abortLiveTurnBeforeStop` (stop-box.ts) does.
+ * `sandboxRuntimeEndpoint` is NOT reused: it resolves a preview user context,
+ * which returns null without an actor user (`resolvePreviewUserContext`),
+ * so the signed header is omitted and the daemon's auth gate 401s every
+ * non-`/kortix/*` path. The reaper has no actor user.
+ */
+async function resolveDaemonEndpoint(
+  externalId: string,
+  sandboxId: string,
+): Promise<{ url: string; headers: Record<string, string> } | null> {
+  try {
+    const serviceKey = await resolveServiceKey(externalId);
+    if (!serviceKey) return null; // nothing to sign with — box has no key on record
+
+    const ingress = await resolveSandboxIngress(externalId, {
+      port: DAEMON_PORT,
+      transport: 'http',
+    });
+    const headers: Record<string, string> = {
+      ...ingress.headers,
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${serviceKey}`,
+      [KORTIX_USER_CONTEXT_HEADER]: encodeKortixUserContext(
+        {
+          userId: 'system:reaper',
+          sandboxId,
+          sandboxRole: 'platform_admin',
+          scopes: ['*'],
+        },
+        serviceKey,
+      ),
+    };
+    return { url: ingress.url.replace(/\/$/, ''), headers };
+  } catch (err) {
+    console.warn(
+      `[husk-finalizer] endpoint unresolved for sandbox ${sandboxId}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
+interface HuskInspection {
+  /** False when the read failed. "Could not tell" is never evidence. */
+  known: boolean;
+  /** An assistant message answering the TARGET user message is in the window. */
+  targetFound: boolean;
+  /** That message is still open by the daemon's predicate. */
+  targetOpen: boolean;
+  /** That message is the LAST on the root — nothing newer followed it. */
+  targetIsLast: boolean;
+  /** The root's last message, used to spot a newer turn across the two reads. */
+  lastMessageId: string | null;
+}
+
+const UNKNOWN_INSPECTION: HuskInspection = {
+  known: false,
+  targetFound: false,
+  targetOpen: false,
+  targetIsLast: false,
+  lastMessageId: null,
+};
+
+/**
+ * The abort is ROOT-scoped, so it may only be issued while the target's open
+ * assistant message is also the root's LAST message. A newer message on the
+ * root means a newer turn may be streaming there, and aborting would end that
+ * one and stamp it "Interrupted".
+ */
+function isAbortableHusk(inspection: HuskInspection): boolean {
+  return inspection.targetFound && inspection.targetOpen && inspection.targetIsLast;
+}
+
+/**
+ * Read the tail of the root and judge the assistant message that answers `messageId`, on the
+ * box's own session log (`runtime.log.v1`, every box past the runtime floor). A read failure is
+ * `known: false`: "could not tell" is never evidence. The target is the newest assistant message whose `reply_to` is `messageId`; it is
+ * open while its status is `streaming`. The reaper asks only after the box reported no turn in
+ * flight. pi marks a record `streaming` only while it is busy (an open tool call), and appends a
+ * text message only when it ends, so on pi a husk is exactly a `streaming` record on an idle box.
+ */
+async function inspectRoot(
+  endpoint: { url: string; headers: Record<string, string> },
+  messageId: string,
+): Promise<HuskInspection> {
+  try {
+    const res = await fetch(`${endpoint.url}${runtimeVerbPaths.log({ limit: READ_MESSAGE_LIMIT })}`, {
+      headers: sandboxRuntimeRequestHeaders(endpoint.headers),
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+    });
+    if (!res.ok) return UNKNOWN_INSPECTION;
+    const body = (await res.json()) as { messages?: unknown } | null;
+    const messages = body?.messages as Array<{ message_id?: string; role?: string; reply_to?: string | null; status?: string }>;
+    if (!Array.isArray(messages)) return UNKNOWN_INSPECTION;
+    if (messages.length === 0) return { ...UNKNOWN_INSPECTION, known: true };
+    const lastMessageId = messages[messages.length - 1]?.message_id ?? null;
+    let targetIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'assistant' && messages[i]?.reply_to === messageId) {
+        targetIndex = i;
+        break;
+      }
+    }
+    if (targetIndex < 0) return { ...UNKNOWN_INSPECTION, known: true, lastMessageId };
+    return {
+      known: true,
+      targetFound: true,
+      targetOpen: messages[targetIndex]?.status === 'streaming',
+      targetIsLast: targetIndex === messages.length - 1,
+      lastMessageId,
+    };
+  } catch {
+    return UNKNOWN_INSPECTION;
+  }
+}
+
+/**
+ * Close one husk. The caller may act on the outcome:
+ *   'finalized'   — the turn is provably closed now.
+ *   'not_husk'    — nothing THIS turn owns is open (completed, errored, never
+ *                   delivered, or the open message belongs to another turn).
+ *   'unreadable'  — no evidence either way; do not treat as terminal.
+ *   'unconfirmed' — the abort was issued but the turn still reads open.
+ */
+export async function finalizeHuskTurn(
+  target: HuskFinalizeTarget,
+  options?: HuskFinalizeOptions,
+): Promise<HuskFinalizeOutcome> {
+  const { sandboxId, externalId, runtimeSessionId, messageId } = target;
+  // No message identity, no attribution. A `/command` or `/summarize` turn and
+  // any pre-messageId record land here; aborting the root for them would be a
+  // guess against a live turn, so they close the same way they did before this
+  // module existed — they don't.
+  if (!messageId) return 'not_husk';
+  const endpoint = await resolveDaemonEndpoint(externalId, sandboxId);
+  if (!endpoint) return 'unreadable';
+  const first = await inspectRoot(endpoint, messageId);
+  if (!first.known) return 'unreadable';
+  if (!isAbortableHusk(first)) return 'not_husk';
+
+  await new Promise((resolve) => setTimeout(resolve, options?.settleMs ?? HUSK_SETTLE_MS));
+
+  const second = await inspectRoot(endpoint, messageId);
+  // Never abort on the strength of the first read alone.
+  if (!second.known) return 'unreadable';
+  if (!isAbortableHusk(second)) return 'not_husk'; // it finished, or a newer turn owns the root
+  if (first.lastMessageId && second.lastMessageId !== first.lastMessageId) {
+    return 'not_husk'; // a newer turn started, and that one is certainly alive
+  }
+
+  try {
+    const res = await fetch(`${endpoint.url}${runtimeVerbPaths.abort(runtimeSessionId)}`, {
+      method: 'POST',
+      headers: endpoint.headers,
+      signal: AbortSignal.timeout(ABORT_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      console.warn(`[husk-finalizer] abort declined for sandbox ${sandboxId}: ${res.status}`);
+    }
+  } catch (err) {
+    console.warn(
+      `[husk-finalizer] abort failed for sandbox ${sandboxId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  // POST-CONDITION. The abort's own status is not the authority — the read is.
+  // `inspectRoot` reads any status but `streaming` as closed.
+  //
+  // 'finalized' is a claim about ONE message, so the target must be SEEN closed.
+  // A target that vanished from the window is not proof: a newer turn can push
+  // it out, and a `session.revert` commit can truncate the root away entirely.
+  // Both would otherwise be reported as a closure and the caller
+  // (box-reaper.ts) deletes the record either way, so a wrong 'finalized'
+  // is never retried and the husk stays open forever — the bug this module
+  // exists to fix.
+  const after = await inspectRoot(endpoint, messageId);
+  if (!after.known || !after.targetFound || after.targetOpen) return 'unconfirmed';
+  console.info('[husk-finalizer] finalized orphaned turn', {
+    sandboxId,
+    runtimeSessionId,
+    messageId,
+  });
+  return 'finalized';
+}

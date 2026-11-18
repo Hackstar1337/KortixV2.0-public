@@ -1,0 +1,517 @@
+
+import { projectSessions, projectSpaces } from '@kortix/db';
+import { COMPILED_AGENT_CONFIG_ENV, fitsInEnvString } from '@kortix/api-contract/compiled-agent-config-env';
+import { eq } from 'drizzle-orm';
+
+
+
+
+
+import { config } from '../../config';
+
+
+
+
+
+
+
+
+
+
+
+import { repointRetiredSessionModel } from '../../llm-gateway/resolution/session-model-repoint';
+import { accountMayUseManagedModels } from '../../billing/services/entitlements';
+import { sandboxFrontendBaseUrl } from '../../platform/sandbox-frontend-url';
+
+
+
+
+
+import { db } from '../../shared/db';
+import { configReleaseEnvForSession } from '../../config-releases/publish';
+import { logger } from '../../lib/logger';
+import { ProvisionTimeline } from '../../platform/services/provision-timeline';
+
+
+
+
+
+import { resolveSessionSecretGrant } from './secret-grant';
+
+import { AmbiguousSecretGrantError, intersectSecretGrants, listProjectSecretsSnapshotForUser } from '../secrets';
+import { SECRET_CAPABILITIES_ENV_NAME } from '../secret-capabilities';
+import { piPackageBundleForSession } from '../../pi-packages/bundle';
+import { manifestPiCodemode, manifestPiContext, manifestPiPackages, resolveCompiledAgentConfigForSession, resolveSelectedAgentConfigForSession, manifestWorkspaceSetup, type SessionWorkspaceSetup } from './compile-agent-config';
+
+
+
+
+import { isReservedSandboxEnvName } from './sandbox-env-names';
+import { deriveKortixApiRoot, proxyGitUrl } from './serializers';
+
+export { proxyGitUrl };
+
+
+
+import { sessionChannelEnvFromMetadata, sessionParentEnv, sessionSpaceEnv } from './session-channel-env';
+
+
+
+
+
+
+
+import { buildSessionRuntimeContextEnv } from './session-runtime-context';
+import { buildFeatureFlagSandboxEnv } from './feature-flag-env';
+import { resolveFeatureFlag } from '../../feature-flags/registry';
+import { buildSessionRuntimeEnv } from './session-runtime-env';
+import { buildMyKortixConfig } from './my-kortix-agent';
+import { myKortixSessionGrant } from './colleague-access';
+
+import { resolveSessionPersonalOwner } from './personal-resources';
+import { projectsView } from '../../workspaces/rows';
+
+
+/**
+ * Re-derive persisted channel env so every cold reprovision restores it, the
+ * channel or DM the session is a thread of (`chat` on), and the session that
+ * started this one (`KORTIX_PARENT_SESSION_ID`: the agent reads its
+ * conversation with `kortix sessions log`).
+ */
+async function buildSessionChannelEnv(sessionId: string): Promise<Record<string, string>> {
+  try {
+    const [row] = await db
+      .select({
+        metadata: projectSessions.metadata,
+        parentSessionId: projectSessions.parentSessionId,
+        projectMetadata: projectsView.metadata,
+        spaceId: projectSpaces.spaceId,
+        kind: projectSpaces.kind,
+        slug: projectSpaces.slug,
+        dmAgentName: projectSpaces.dmAgentName,
+      })
+      .from(projectSessions)
+      .leftJoin(projectsView, eq(projectsView.projectId, projectSessions.projectId))
+      .leftJoin(projectSpaces, eq(projectSpaces.spaceId, projectSessions.spaceId))
+      .where(eq(projectSessions.sessionId, sessionId))
+      .limit(1);
+    const space =
+      row?.spaceId && row.kind && resolveFeatureFlag(row.projectMetadata, 'chat')
+        ? { spaceId: row.spaceId, kind: row.kind, slug: row.slug, dmAgentName: row.dmAgentName }
+        : null;
+    return { ...sessionChannelEnvFromMetadata(row?.metadata), ...sessionSpaceEnv(space), ...sessionParentEnv(row) };
+  } catch (err) {
+    console.warn('[session-env] failed to restore channel binding', {
+      sessionId,
+      err: (err as Error).message,
+    });
+    return {};
+  }
+}
+
+type SessionSandboxEnvInput = {
+  accountId: string;
+  projectId: string;
+  sessionId: string;
+  userId: string;
+  repoUrl: string;
+  baseRef: string;
+  agentName: string;
+  sessionModel?: string | null;
+  /** The project's base-branch tip SHA, resolved from the API's Git mirror. */
+  baseSha?: string;
+  /** Project git context, so the running agent's `secrets` grant in `agents:`
+   *  can be resolved and applied by IDENTIFIER — secrets the agent isn't
+   *  granted are dropped from the injected env (a prompt-injected agent then
+   *  can't read another scope's keys out of $ENV). Optional: when absent, the
+   *  grant defaults to 'all' (back-compat, no narrowing). */
+  defaultBranch?: string;
+  manifestPath?: string;
+  /** The reserved platform coordinator receives no project secrets. */
+  platformMetaAgent?: boolean;
+  /** May this box receive repository bytes (`repository_access` on the session row, decided by
+   *  grants at create)? False: only the session's own agent is compiled, and no release archive
+   *  of the repository tree is signed for it. */
+  repositoryAccess?: boolean;
+};
+
+/** Compile the session's agent config and resolve its secret grant (one manifest read). */
+async function resolveSessionAgentConfig(input: SessionSandboxEnvInput): Promise<{
+  agentGrantEnv: string[] | 'all' | undefined;
+  compiledAgentConfig: string | null;
+  manifestPackages: unknown[];
+  manifestCodemode: 'off' | 'on' | 'only' | null;
+  manifestContext: 'record' | 'summary' | null;
+  workspaceSetup: SessionWorkspaceSetup | null;
+}> {
+  let agentGrantEnv: string[] | 'all' | undefined;
+
+  // Compile kortix.yaml into the agent config the sandbox receives sealed (see
+  // compile-agent-config.ts). `null` for a project with no manifest file — no
+  // KORTIX_COMPILED_AGENT_CONFIG key is emitted below in that case. Gated on the
+  // same `defaultBranch` presence as the `agents:` grant resolution below
+  // (both need git context; optional call sites that omit it get neither).
+  let compiledAgentConfig: string | null = input.platformMetaAgent
+    ? buildMyKortixConfig()
+    : null;
+  // The agent's pi packages and codemode, read off the SAME fetch that
+  // compiles the agent config, so they cost no extra git round trip.
+  let manifestPackages: unknown[] = [];
+  let manifestCodemode: 'off' | 'on' | 'only' | null = null;
+  let manifestContext: 'record' | 'summary' | null = null;
+  let workspaceSetup: SessionWorkspaceSetup | null = null;
+  if (input.defaultBranch && !input.platformMetaAgent) {
+    const gitProject = {
+      projectId: input.projectId,
+      repoUrl: input.repoUrl,
+      defaultBranch: input.defaultBranch,
+      manifestPath: input.manifestPath ?? 'kortix.yaml',
+      gitAuthToken: null,
+    };
+    const onManifest = (raw: Record<string, unknown>) => {
+      manifestPackages = manifestPiPackages(raw, input.agentName);
+      manifestCodemode = manifestPiCodemode(raw, input.agentName);
+      manifestContext = manifestPiContext(raw, input.agentName);
+      workspaceSetup = manifestWorkspaceSetup(raw, input.agentName);
+    };
+    // `'tip-proof'`: the base ref was at the remote's tip within the refresh
+    // interval, proven by this process or adopted from another
+    // (projects/git/mirror.ts). The plain TTL read fetched all of a large
+    // repo's branches whenever this process had not fetched for 60 s: p50
+    // 742 ms, p90 4.7 s on prod for this step (2026-10-30).
+    const read = { onManifest, forceRefresh: 'tip-proof' as const };
+    const compiled =
+      !(input.repositoryAccess ?? true)
+        ? resolveSelectedAgentConfigForSession(gitProject, input.agentName, input.baseRef, read)
+        : resolveCompiledAgentConfigForSession(gitProject, input.baseRef, read);
+
+    // Per-agent secret scoping: an agent declared in `agents:` with a `secrets`
+    // allowlist receives ONLY those IDENTIFIERS — so a narrowly-scoped agent
+    // can't read another scope's API keys/payment creds straight out of $ENV.
+    // No-op (undefined → 'all') for back-compat grants and projects without
+    // an `agents:` map or git context. This is the ONLY gate on agent secret
+    // access — there is no resource-side allow-list on the secret itself.
+    //
+    // FAIL CLOSED: this used to `.catch(() => null)`, which collapsed a loader
+    // throw into an unrestricted grant — a transient git/parse failure silently
+    // handed the session every project secret. It now throws
+    // SecretGrantResolutionError and the provision fails instead. Shares one
+    // resolver with the per-prompt hot push (lib/secret-grant.ts) so the two
+    // paths can no longer disagree about what this agent may read.
+    //
+    // The compile and the grant read the manifest independently, so they run
+    // together: the grant's refresh waits for the compile's tip proof and
+    // reuses it (refreshMirror's lock), and its git reads no longer wait for
+    // the compile's. Either failure still fails the build. Sequential, the pair was the
+    // `agent-config` step: p50 1.0 s on prod in a project with 28 agents
+    // (2026-11-01).
+    [compiledAgentConfig, agentGrantEnv] = await Promise.all([
+      compiled,
+      resolveSessionSecretGrant({
+        projectId: input.projectId,
+        repoUrl: input.repoUrl,
+        defaultBranch: input.defaultBranch,
+        manifestPath: input.manifestPath,
+        sessionAgent: input.agentName,
+        forceRefresh: 'tip-proof',
+      }),
+    ]);
+  }
+  return { agentGrantEnv, compiledAgentConfig, manifestPackages, manifestCodemode, manifestContext, workspaceSetup };
+}
+
+/** Read the session's runtime secrets and drop the ones the sandbox must never hold. */
+async function loadSessionRuntimeSecrets(
+  input: SessionSandboxEnvInput,
+  secretsPrincipalUserId: Awaited<ReturnType<typeof resolveSessionPersonalOwner>>,
+  grantEnvForSession: ReturnType<typeof intersectSecretGrants>,
+  agentGrantEnv: string[] | 'all' | undefined,
+): Promise<{
+  env: Record<string, string>;
+  names: string[];
+  revision: string;
+  capabilitiesJson: string;
+}> {
+  let runtimeSecrets: {
+    env: Record<string, string>;
+    names: string[];
+    revision: string;
+    capabilitiesJson: string;
+  };
+  try {
+    runtimeSecrets = await listProjectSecretsSnapshotForUser(
+      input.projectId,
+      secretsPrincipalUserId,
+      grantEnvForSession,
+      // Non-`runtime` rows are delivered as a per-session handle, so the
+      // chokepoint needs the session this env is being built FOR. Without it it
+      // withholds them rather than falling back to plaintext.
+      input.sessionId,
+    );
+  } catch (err) {
+    if (err instanceof AmbiguousSecretGrantError) {
+      console.error(
+        `[session ${input.sessionId}] agent '${input.agentName}' secrets grant is ambiguous: ${err.message}`,
+      );
+    }
+    throw err;
+  }
+  if (Array.isArray(agentGrantEnv) && agentGrantEnv.length > 0) {
+    console.log(
+      `[session ${input.sessionId}] agent '${input.agentName}' env-scoped to ${agentGrantEnv.length} granted identifier(s)`,
+    );
+  }
+  // The Slack signing secret only verifies inbound webhooks (an apps/api job).
+  // The in-sandbox agent never needs it — keep it out of the sandbox env.
+  delete runtimeSecrets.env.SLACK_SIGNING_SECRET;
+  // The Slack BOT TOKEN no longer belongs in the sandbox either: the `slack`
+  // shim now runs every Web API call through the Connector (server-side token)
+  // and its file ops through the server-side file proxy. Keeping it out means a
+  // compromised/prompt-injected agent can't exfiltrate the raw bot token — only
+  // make scoped, audited, policy-gated channel calls. (KORTIX-206 Phase C2.)
+  delete runtimeSecrets.env.SLACK_BOT_TOKEN;
+  // Guardrail: drop any project secret whose name would clobber the sandbox's
+  // own runtime env (PORT/PATH/KORTIX_*/…). Without this, one stray secret
+  // silently breaks every session — and `kortix env push` of a server .env
+  // makes that a one-command footgun.
+  const droppedReserved = Object.keys(runtimeSecrets.env).filter(isReservedSandboxEnvName);
+  for (const name of droppedReserved) delete runtimeSecrets.env[name];
+  if (droppedReserved.length > 0) {
+    console.warn(
+      `[session ${input.sessionId}] ignored ${droppedReserved.length} project secret(s) with reserved env names: ${droppedReserved.join(', ')}`,
+    );
+  }
+  return runtimeSecrets;
+}
+
+export async function buildSessionSandboxEnvVars(input: SessionSandboxEnvInput): Promise<Record<string, string>> {
+  // Only user runtime secrets belong here. The sandbox-scoped KORTIX_TOKEN is
+  // minted by provisionSessionSandbox() and injected at the provider boundary,
+  // then reused by the daemon for both API calls and proxy HMAC validation.
+  // Resolved AS the session's OWNER (createdBy, read below). This keeps personal
+  // override selection consistent for server consumers without delivering the
+  // value to the sandbox. Every OTHER secret is project-wide (secret
+  // sharing was retired — authorization is centralized on the running agent's
+  // `secrets` grant, applied below by identifier).
+  // One `[provision-timeline] session-env` line per build: create, restart and open all wait on it.
+  const tl = new ProvisionTimeline(input.sessionId, 'session-env');
+  // Every provisioning path waits on this build before it asks the provider for
+  // a box (session-sandbox.ts awaits `extraEnvVars`), so it is on the critical
+  // path of every new session. The reads below used to run one after another:
+  // p50 823 ms / p90 1.3 s on prod (2026-11-02, 26 builds), of which the
+  // agent-config git read is p50 532 ms and the other ten steps the rest. They
+  // now start together. Steps that need another's answer chain on it (pi
+  // packages and the model re-point and secrets on the agent config, the last
+  // two also on the policy row), so nothing writes before the agent config
+  // resolved, exactly as before. Each read is AWAITED in the old order, so the
+  // first failure in program order is still the one that throws.
+  const started = <T>(promise: Promise<T>): Promise<T> => {
+    // Owned by its own await below; this only keeps a rejection that lands
+    // before that await from being reported as unhandled.
+    promise.catch(() => undefined);
+    return promise;
+  };
+  const agentConfigRead = started(tl.span('agent-config', () => resolveSessionAgentConfig(input)));
+  // The prebuilt bundle of the project's pi packages (one S3 HEAD + presign; none without npm packages).
+  const piPackagesRead = started(
+    agentConfigRead.then(({ manifestPackages }) =>
+      manifestPackages.length > 0
+        ? tl.span('pi-packages', () =>
+            piPackageBundleForSession(manifestPackages, { projectId: input.projectId, sessionId: input.sessionId }),
+          )
+        : null,
+    ),
+  );
+
+  // Per-session secret policy, read by sessionId inside the builder so all three
+  // call sites (create, restart, open/ensure) are covered — no caller can
+  // forget them. `secretsAllowlist` NARROWS the agent grant to (grant) ∩ (list)
+  // so a backend-vouched session only receives the secrets the wrapper named
+  // (null → passthrough, byte-identical to pre-KaaB).
+  //
+  // The secrets principal is the session's OWNER (`createdBy`), read here by
+  // sessionId — NOT `input.userId`, which is whoever is provisioning this run.
+  // On create those coincide, but restart/open/ensure-runtime provision on
+  // behalf of any project manager/admin, and a per-user secret override (today
+  // CODEX_AUTH_JSON) resolves per principal (`listResolvedProjectSecrets`). If a
+  // manager restarted another member's session we'd inject the MANAGER's personal
+  // secret at boot, which the first prompt's hot-push (`resolveOwnerRawEnv`, keyed
+  // on `createdBy`) would then clobber back — a cross-principal bleed + flip-flop.
+  // Deriving the principal from `createdBy` here unifies all three provisioning
+  // paths with hot-push and the admin provider-migrate path. Falls back to
+  // `input.userId` only if the row somehow isn't found (create races its own row
+  // in some callers). The agent grant — not the human — remains the authority on
+  // WHICH identifiers are eligible; this only picks the per-user override owner.
+  //
+  // Spec 2026-09-22 §2.3 (agent-principal model, flag ON): the override owner
+  // is the session's on-behalf-of human, and only in a private session. A
+  // trigger/channel run or a shared session gets shared values only.
+  const policyRead = started(
+    tl.span('policy-owner', async () => {
+      const [sessionPolicyRow] = await db
+        .select({
+          secretsAllowlist: projectSessions.secretsAllowlist,
+          createdBy: projectSessions.createdBy,
+          metadata: projectSessions.metadata,
+        })
+        .from(projectSessions)
+        .where(eq(projectSessions.sessionId, input.sessionId))
+        .limit(1);
+      const secretsPrincipalUserId = await resolveSessionPersonalOwner({
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        accountId: input.accountId,
+        legacyUserId: sessionPolicyRow?.createdBy ?? input.userId,
+      });
+      return { sessionPolicyRow, secretsPrincipalUserId };
+    }),
+  );
+  const managedModelsRead = input.sessionModel ? started(accountMayUseManagedModels(input.accountId)) : null;
+
+  // A session's stored model pin outlives any single boot — the runtime
+  // managed lineup can rotate past it while the session sits open. Re-point
+  // it here, at this ONE chokepoint every provisioning path (create, restart,
+  // open/ensure) already shares, before the box boots on a dead id. No-op for
+  // the overwhelming common case (a still-servable or non-managed pin) — see
+  // llm-gateway/resolution/session-model-repoint.ts.
+  const modelRead = started(
+    Promise.all([agentConfigRead, policyRead]).then(async ([, { sessionPolicyRow, secretsPrincipalUserId }]) => {
+      const sessionModel = input.sessionModel ?? null;
+      if (!sessionModel) return null;
+      const freeModelsOnly = !(await managedModelsRead);
+      return tl.span('model-repoint', () =>
+        repointRetiredSessionModel(sessionModel, {
+          projectId: input.projectId,
+          accountId: input.accountId,
+          sessionId: input.sessionId,
+          userId: secretsPrincipalUserId ?? input.userId,
+          agentName: input.agentName,
+          freeModelsOnly,
+          metadata: sessionPolicyRow?.metadata ?? null,
+        }),
+      );
+    }),
+  );
+  const secretsRead = started(
+    Promise.all([agentConfigRead, policyRead]).then(async ([{ agentGrantEnv }, { sessionPolicyRow, secretsPrincipalUserId }]) => {
+      // My Kortix holds every secret its person can use (`myKortixAgentGrant`);
+      // the person's reach filters the values in `loadSessionRuntimeSecrets`.
+      const grantEnvForSession = intersectSecretGrants(
+        input.platformMetaAgent
+          ? (await myKortixSessionGrant(input.sessionId, {
+              projectId: input.projectId,
+              repoUrl: input.repoUrl,
+              defaultBranch: input.defaultBranch,
+              manifestPath: input.manifestPath,
+            })).env
+          : agentGrantEnv,
+        sessionPolicyRow?.secretsAllowlist ?? null,
+      );
+      return tl.span('secrets', () =>
+        loadSessionRuntimeSecrets(input, secretsPrincipalUserId, grantEnvForSession, agentGrantEnv),
+      );
+    }),
+  );
+  // pi boots from the published release: signed store URLs, no API call (config-releases/publish.ts).
+  // Any other session, and any lookup that fails, leaves it out: the box asks the descriptor route.
+  // A read with a fire-and-forget publish (publish.ts), so it needs nothing above.
+  const configReleaseRead = started(
+    tl.span('config-release', () =>
+      (input.repositoryAccess ?? true) && !input.platformMetaAgent
+        ? configReleaseEnvForSession({
+            projectId: input.projectId,
+            ref: input.baseRef,
+            agentName: input.agentName,
+            tip: input.baseSha ?? null,
+          }).catch((error: Error) => {
+            logger.warn('[config-releases] published release lookup failed; the box asks the route', {
+              projectId: input.projectId,
+              sessionId: input.sessionId,
+              error: error.message,
+            });
+            return null;
+          })
+        : Promise.resolve(null),
+    ),
+  );
+  // Restore the session's channel binding on EVERY (re)provision. A session
+  // created from a chat channel (e.g. Slack) persists its binding in
+  // metadata.slack; the in-box relay gates turn-end/answer on SLACK_THREAD_TS /
+  // SLACK_CHANNEL_ID, so a box rebuilt from scratch (archived → cold-reprovision)
+  // must get these back or the resurrected agent can't talk to its thread. The
+  // session is the durable source of truth; the first boot got these via
+  // extraEnvVars, every later rebuild gets them here.
+  const channelContextFlagsRead = started(
+    tl.span('channel-context-flags', () =>
+      Promise.all([
+        buildSessionChannelEnv(input.sessionId),
+        buildSessionRuntimeContextEnv(input.sessionId),
+        buildFeatureFlagSandboxEnv(input.projectId),
+      ]),
+    ),
+  );
+
+  const { compiledAgentConfig, manifestPackages, manifestCodemode, manifestContext, workspaceSetup } = await agentConfigRead;
+  const piPackagesBundle = await piPackagesRead;
+  await policyRead;
+  const sessionModel = await modelRead;
+  const runtimeSecrets = await secretsRead;
+  const configRelease = await configReleaseRead;
+  if (compiledAgentConfig && !fitsInEnvString(COMPILED_AGENT_CONFIG_ENV, compiledAgentConfig)) {
+    // Sizes only. An image whose kortixd predates the gzip form boots without
+    // this config, so the line is how to find sessions that need a newer image.
+    logger.info('[session-env] compiled agent config exceeds one env string; sending it gzip-encoded', {
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      configBytes: Buffer.byteLength(compiledAgentConfig, 'utf8'),
+    });
+  }
+  const [channelEnv, sessionContextEnv, featureFlagEnv] = await channelContextFlagsRead;
+  tl.log();
+  return {
+    ...runtimeSecrets.env,
+    ...channelEnv,
+    ...sessionContextEnv,
+    ...featureFlagEnv,
+    ...(configRelease ? { KORTIX_CONFIG_RELEASE: configRelease } : {}),
+    KORTIX_PROJECT_SECRET_NAMES: runtimeSecrets.names.join(','),
+    KORTIX_PROJECT_SECRETS_REVISION: runtimeSecrets.revision,
+    [SECRET_CAPABILITIES_ENV_NAME]: runtimeSecrets.capabilitiesJson,
+    ...buildSessionRuntimeEnv({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      // The Kortix Git proxy, authenticated with KORTIX_TOKEN. Direct upstream
+      // origins are never delivered to the guest: they need a provider credential.
+      repoUrl: proxyGitUrl(input.projectId),
+      baseRef: input.baseRef,
+      agentName: input.agentName,
+      apiUrl: deriveKortixApiBase(),
+      frontendUrl: sandboxFrontendBaseUrl(),
+      // Concrete session model after explicit → agent → project → account →
+      // platform resolution — re-pointed above when the runtime lineup
+      // retired it. The sandbox uses it for the first turn and as the
+      // runtime's default model.
+      sessionModel,
+      compiledAgentConfig,
+      piPackages: manifestPackages,
+      piCodemode: manifestCodemode,
+      piContext: manifestContext,
+      workspaceSetup,
+      repositoryAccess: input.repositoryAccess ?? true,
+      piPackagesBundle,
+    }),
+    // The platform coordinator uses API-level delegation.
+    ...(input.platformMetaAgent ? { KORTIX_META_AGENT: '1' } : {}),
+    // The restore graduated on 2026-11-05: a current daemon reconciles at every boot without this key.
+    // A daemon older than that skips the reconcile unless it reads '1', so every box gets it. Delete
+    // the key once the runtime floor (session-open/runtime-floor-policy.ts) excludes those daemons.
+    KORTIX_SESSION_LOG_RESTORE: '1',
+  };
+}
+
+/** Derive the API v1 base URL sandboxes call as `$KORTIX_API_URL`. */
+
+export function deriveKortixApiBase(): string {
+  return `${deriveKortixApiRoot(config.KORTIX_URL)}/v1`;
+}
+

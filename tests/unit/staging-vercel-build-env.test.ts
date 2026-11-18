@@ -1,0 +1,36 @@
+import { describe, expect, it } from 'vitest';
+import { readWorkflow } from '../src/fixtures/repo';
+
+// The Vercel build bakes the runtime config into prerendered pages
+// (apps/web/src/lib/runtime-config-mode.ts). `--env` reaches only the runtime,
+// so every staging value must also reach the build through `--build-env`, or
+// staging bakes the project's generic Preview values.
+describe('staging Vercel deploy', () => {
+  const workflow = readWorkflow('deploy-staging.yml');
+  const start = workflow.indexOf('          staging_env=(');
+  const end = workflow.indexOf('| tail -n1)"', start);
+  const block = workflow.slice(start, end);
+
+  it('passes every staging value to both the build and the runtime', () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(block).toContain('env_flags+=(--env "$kv" --build-env "$kv")');
+    expect(block).toContain('"${env_flags[@]}"');
+    // No bare runtime-only value may bypass the shared list.
+    expect(block).not.toMatch(/^\s+(-e|--env) \S+=/m);
+  });
+
+  it('keeps the values the baked runtime config reads', () => {
+    for (const key of [
+      'NEXT_PUBLIC_BACKEND_URL',
+      'KORTIX_PUBLIC_BACKEND_URL',
+      'NEXT_PUBLIC_SUPABASE_URL',
+      'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+      'NEXT_PUBLIC_APP_URL',
+      'NEXT_PUBLIC_BILLING_ENABLED',
+      'NEXT_PUBLIC_AUTH_PROVIDERS',
+      'NEXT_PUBLIC_AUTH_METHODS',
+    ]) {
+      expect(block).toMatch(new RegExp(`^\\s+${key}=`, 'm'));
+    }
+  });
+});

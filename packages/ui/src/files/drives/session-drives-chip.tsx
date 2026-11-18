@@ -1,0 +1,157 @@
+'use client';
+
+import { uiRoutes } from '../../lib/routes';
+import { Button } from '../../primitives/button';
+import { warningToast } from '../../primitives/toast';
+import { Home } from '../../internal/icons/home';
+import { useSessionDrives } from './use-drives';
+import { type ConflictMarks, readConflictMarks } from './conflict-marks';
+import type { SessionDrive, SessionDrives } from '@kortix/sdk';
+import { useLocale, useTranslations } from '../../i18n';
+import { formatStorageBytes } from './drive-storage';
+import { ArrowUpRightIcon, FolderIcon, WarningIcon } from '@phosphor-icons/react';
+import { useUiLink } from '../../providers/ui-provider';
+import { useEffect, useRef } from 'react';
+
+type SkippedReason = NonNullable<NonNullable<SessionDrives['skipped']>[number]['reason']>;
+
+/**
+ * One notice per cause of a folder the box does not mount: storage refused it
+ * at boot (it mounts later), it is too large to mount, or it did not fit.
+ */
+const SKIPPED_NOTICES: Array<{ key: 'sessionSkippedUnavailable' | 'sessionSkippedTooLarge' | 'sessionSkippedDrives'; matches: (reason: SkippedReason | undefined) => boolean }> = [
+  { key: 'sessionSkippedUnavailable', matches: (reason) => reason === 'unavailable' },
+  { key: 'sessionSkippedTooLarge', matches: (reason) => reason === 'too_large' },
+  { key: 'sessionSkippedDrives', matches: (reason) => reason !== 'unavailable' && reason !== 'too_large' },
+];
+
+/** Where the person's own folder also appears in the box: a path, not prose. */
+const DESKTOP_PATH = '~/Desktop';
+
+/**
+ * The Files row of the session's ⚙ sheet: the folders of the project's Drive
+ * this session mounts, where the agent sees them, and whether it may write.
+ * What mounts follows folder access: share a folder in Drive to give it to
+ * this session (it arrives within seconds), stop sharing to take it away. The
+ * person's own folder is their desktop, at /drives/me.
+ */
+export function SessionDrivesList({ projectId, sessionId }: { projectId: string; sessionId: string }) {
+  const t = useTranslations('drives');
+  const Link = useUiLink();
+  const driveHref = uiRoutes().drive(projectId);
+  const locale = useLocale();
+  const session = useSessionDrives(projectId, sessionId);
+  const rows = session.data?.drives ?? [];
+  const skipped = session.data?.skipped ?? [];
+  // A folder too large to mount names its size: the number to get it under.
+  const named = (d: NonNullable<SessionDrives['skipped']>[number]) =>
+    d.reason === 'too_large' && typeof d.bytes === 'number' ? `${d.name} (${formatStorageBytes(d.bytes, locale)})` : d.name;
+
+  return (
+    <div className="flex flex-col gap-3">
+      {driveHref ? (
+        <Button
+          asChild
+          variant="ghost"
+          size="xs"
+          className="text-muted-foreground hover:text-foreground -ml-1.5 gap-1 self-start"
+        >
+          <Link href={driveHref}>
+            {t('openDrive')}
+            <ArrowUpRightIcon className="size-3.5" />
+          </Link>
+        </Button>
+      ) : null}
+      {rows.length === 0 ? (
+        <p className="text-muted-foreground py-2 text-xs">
+          {session.isLoading ? t('sessionCanUse') : t('sessionNoFolders')}
+        </p>
+      ) : (
+        // Up to 8 mount (the sandbox's volume limit), so the list stays short.
+        <ul className="border-border divide-border divide-y rounded-lg border">
+          {rows.map((row) => (
+            <li key={row.mountPath}>
+              <SessionFolderRow driveHref={driveHref} row={row} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {SKIPPED_NOTICES.map(({ key, matches }) => {
+        const these = skipped.filter((d) => matches(d.reason));
+        if (!these.length) return null;
+        return (
+          <p
+            key={key}
+            role="status"
+            className="bg-kortix-orange/15 text-foreground flex items-start gap-2 rounded-md px-2.5 py-2 text-xs text-pretty"
+          >
+            <WarningIcon className="text-kortix-orange mt-px size-3.5 shrink-0" weight="fill" />
+            {t(key, { count: these.length, names: these.map(named).join(', ') })}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Raises the session's conflict notice: one toast when a mounted folder gets a
+ * new conflict copy. Mounted beside the composer, with no chrome of its own.
+ */
+export function SessionDrivesWatch({ projectId, sessionId }: { projectId: string; sessionId: string }) {
+  const session = useSessionDrives(projectId, sessionId);
+  useConflictToast(session.data?.drives, sessionId);
+  return null;
+}
+
+/**
+ * One mounted folder: its name, where the agent sees it, and read or write. It
+ * opens the folder in Drive. A host without a Drive page shows the row without
+ * the link.
+ */
+function SessionFolderRow({ driveHref, row }: { driveHref: string | null; row: SessionDrive }) {
+  const t = useTranslations('drives');
+  const Link = useUiLink();
+  const mine = row.role === 'me';
+  const path = mine ? '~' : (row.subdir || '/').replace(/^\/+/, '');
+  const Glyph = mine ? Home : FolderIcon;
+  const className = 'flex min-w-0 items-center gap-2.5 px-3 py-2 outline-none';
+  const body = (
+    <>
+      <Glyph className="text-muted-foreground size-4 shrink-0" />
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-sm">{mine ? t('myDrive') : row.name}</span>
+        <span className="text-muted-foreground truncate font-mono text-xs">
+          {mine ? `${row.mountPath} · ${DESKTOP_PATH}` : row.mountPath}
+        </span>
+      </span>
+      <span className="text-muted-foreground shrink-0 text-xs">{row.readOnly ? t('readOnly') : t('readWrite')}</span>
+    </>
+  );
+  if (!driveHref) return <div className={className}>{body}</div>;
+  return (
+    <Link
+      href={`${driveHref}${path ? `?path=${encodeURI(path)}` : ''}`}
+      className={`${className} hover:bg-accent/60 focus-visible:bg-accent`}
+    >
+      {body}
+    </Link>
+  );
+}
+
+/**
+ * One toast per read that finds conflicts detected while this session watched
+ * (readConflictMarks): never for the conflicts a folder already had when it
+ * mounted, which is every folder of a new session.
+ */
+function useConflictToast(drives: SessionDrive[] | undefined, sessionId: string) {
+  const t = useTranslations('drives');
+  const seen = useRef<{ sessionId: string; marks: ConflictMarks } | null>(null);
+  useEffect(() => {
+    if (!drives) return;
+    const last = seen.current?.sessionId === sessionId ? seen.current.marks : {};
+    const { marks, fresh } = readConflictMarks(last, drives);
+    seen.current = { sessionId, marks };
+    if (fresh > 0) warningToast(t('conflictToast', { count: fresh }));
+  }, [drives, sessionId, t]);
+}

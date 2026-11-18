@@ -1,0 +1,325 @@
+/**
+ * Session attachment admission — the deterministic control-plane half of
+ * SESS-27. Browser evidence owns attachment tiles, reload timestamps, and turn
+ * duration. The focused API tests own runtime write-failure injection. This
+ * flow proves that the public prompt boundary durably accepts one ordered mixed
+ * batch before runtime readiness and stores nothing when staged non-native
+ * bytes are absent. The session create stores its first prompt through the same
+ * sanitizer (`sanitizeInboxPromptParts`); pending-prompt.unit.test.ts pins that
+ * half, because a create needs a sandbox the local profile does not run.
+ */
+import { flow } from '../core/flow';
+import {
+  bindDatabaseSessionCredential,
+  createDatabaseSession,
+  readDatabasePromptAttachmentRetention,
+} from '../fixtures/database-project';
+
+flow('SESS-30', {
+  domain: 'sessions', requires: ['database', 'funded'], timeoutMs: 180_000,
+  routes: [
+    'POST /v1/workspaces/:projectId/attachments',
+    'PUT /v1/workspaces/:projectId/attachments/:attachmentId/chunks/:index',
+    'POST /v1/workspaces/:projectId/attachments/:attachmentId/complete',
+    'DELETE /v1/workspaces/:projectId/attachments/:attachmentId',
+    'DELETE /v1/workspaces/:projectId/sessions/:sessionId',
+    'POST /v1/workspaces/:projectId/sessions/:sessionId/prompts',
+    'GET /v1/workspaces/:projectId/sessions/:sessionId/prompts',
+    'GET /v1/workspaces/:projectId/sessions/:sessionId',
+    'GET /v1/workspaces/:projectId/runtime/prompt-attachments/:attachmentId',
+    'POST /v1/workspaces/:projectId/cli-token',
+    'DELETE /v1/workspaces/:projectId/cli-token/:tokenId',
+  ],
+}, async (ctx) => {
+  const project = await ctx.fixtures.project({ seed: true });
+  const owner = ctx.client.as(ctx.P.OWNER);
+  const base = { projectId: project.id };
+  const bytes = new TextEncoder().encode('eager upload before session readiness\n'.repeat(4000));
+  let attachmentId = '';
+  let upload:
+    | { kind: 'direct'; url: string; method: string; headers: Record<string, string> }
+    | { kind: 'chunked'; chunk_size: number }
+    | undefined;
+  const begin = '/v1/workspaces/:projectId/attachments';
+  const chunk = '/v1/workspaces/:projectId/attachments/:attachmentId/chunks/:index';
+  const complete = '/v1/workspaces/:projectId/attachments/:attachmentId/complete';
+  const remove = '/v1/workspaces/:projectId/attachments/:attachmentId';
+  await ctx.step('anonymous upload initiation is refused and empty or oversized declarations create no upload', async () => {
+    (await ctx.client.as(ctx.P.ANON).post(begin, { filename: 'probe.txt', mime: 'text/plain', size: bytes.length }, { params: base })).status(401);
+    for (const size of [0, 50 * 1024 * 1024 + 1]) {
+      (await owner.post(begin, { filename: 'probe.txt', mime: 'text/plain', size }, { params: base })).status(413);
+    }
+  });
+  await ctx.step('start a project upload before creating any session and receive an opaque handle with a server-selected transport', async () => {
+    const result = await owner.post(begin, { filename: 'eager.txt', mime: 'text/plain', size: bytes.length }, { params: base });
+    result.status(201);
+    const data = result.json<any>();
+    attachmentId = data.attachment_id;
+    upload = data.upload;
+    const direct = upload?.kind === 'direct' && /^https?:\/\//.test(upload.url) && upload.method === 'PUT' && !Object.keys(upload.headers).some((name) => name.toLowerCase() === 'authorization');
+    const chunked = upload?.kind === 'chunked' && Number.isSafeInteger(upload.chunk_size) && upload.chunk_size > 0;
+    if (!(direct || chunked) || data.size !== bytes.length || data.object_path || data.chunk_size) throw new Error('Invalid upload handle metadata');
+  });
+  const params = () => ({ ...base, attachmentId });
+  const rawChunk = (index: number) => ({ params: { ...params(), index }, raw: true, headers: { 'Content-Type': 'application/octet-stream' } });
+  await ctx.step('completion before the bytes arrive returns 409', async () => {
+    (await owner.post(complete, {}, { params: params() })).status(409);
+  });
+  await ctx.step('upload more than 128 KiB with the selected transport: one direct Storage PUT after a same-handle re-sign, or bounded chunks with one replay', async () => {
+    if (upload!.kind === 'direct') {
+      // Direct mode refuses the chunk route; re-signing returns a fresh URL for the same upload.
+      (await owner.put(chunk, bytes.subarray(0, 1), rawChunk(0))).status(409).body().has('$.code', 'attachment_upload_mode');
+      const resigned = await owner.post(begin, { attachment_id: attachmentId, filename: 'eager.txt', mime: 'text/plain', size: bytes.length }, { params: base });
+      resigned.status(201).body().has('$.attachment_id', attachmentId);
+      const target = resigned.json<any>().upload;
+      const stored = await fetch(target.url, { method: target.method, headers: target.headers, body: bytes });
+      if (!stored.ok) throw new Error(`direct Storage PUT returned ${stored.status}`);
+    } else {
+      const size = upload!.chunk_size;
+      (await owner.put(chunk, new Uint8Array(size + 1), rawChunk(0))).status(413);
+      for (let offset = 0, index = 0; offset < bytes.length; offset += size, index++) {
+        const body = bytes.subarray(offset, offset + size);
+        const result = await owner.put(chunk, body, rawChunk(index));
+        result.status(200).body().has('$.received_bytes', Math.min(offset + size, bytes.length));
+        if (index === 0) (await owner.put(chunk, body, rawChunk(index))).status(200).body().has('$.received_bytes', Math.min(size, bytes.length));
+      }
+    }
+    (await owner.post(complete, {}, { params: params() })).status(200).body().has('$.filename', 'eager.txt');
+    (await owner.post(complete, {}, { params: params() })).status(200).body().has('$.attachment_id', attachmentId);
+  });
+  const sessionId = await createDatabaseSession(ctx.env, { projectId: project.id, accountId: ctx.P.OWNER.accountId!, userId: ctx.P.OWNER.userId!, platinumRegion: 'eu-west' });
+  ctx.track('session', sessionId, { projectId: project.id });
+  const firstBody = { client_message_id: 'SESS-30-first', parts: [{ type: 'text', text: 'SESS-30 eager attachment' }, { type: 'file', attachment_id: attachmentId, filename: 'untrusted.txt', mime: 'image/png' }] };
+  await ctx.step('send the first prompt with the ready handle before the box exists, and read the canonical filename from the durable inbox', async () => {
+    (await owner.post('/v1/workspaces/:projectId/sessions/:sessionId/prompts', firstBody, { params: { ...base, sessionId } })).status(202);
+    const inbox = await owner.get('/v1/workspaces/:projectId/sessions/:sessionId/prompts', { params: { ...base, sessionId } });
+    inbox.status(200);
+    const serialized = JSON.stringify(inbox.json());
+    if (!serialized.includes('eager.txt') || serialized.includes('untrusted.txt') || serialized.includes('data:')) throw new Error('Inbox did not use canonical handle metadata');
+    (await owner.del(remove, { params: params() })).status(409);
+  });
+  await ctx.step('enqueue a follow-up using the same handle and deduplicate the repeated client message', async () => {
+    const body = { client_message_id: 'SESS-30-followup', message_id: 'msg_0198f3a1b2c4AbCdEfGhIjKlMn', parts: [{ type: 'text', text: 'SESS-30 follow-up' }, { type: 'file', attachment_id: attachmentId }] };
+    const target = '/v1/workspaces/:projectId/sessions/:sessionId/prompts';
+    const options = { params: { ...base, sessionId } };
+    const first = await owner.post(target, body, options); first.status(202);
+    const second = await owner.post(target, body, options); second.status(200).body().has('$.deduped', true).has('$.prompt_id', first.json<any>().prompt_id);
+    const duplicate = { ...body, client_message_id: 'SESS-30-duplicate', parts: [body.parts[1], body.parts[1]] };
+    (await owner.post(target, duplicate, options)).status(400);
+    const missing = { ...body, client_message_id: 'SESS-30-missing', parts: [{ type: 'file', attachment_id: crypto.randomUUID() }] };
+    (await owner.post(target, missing, options)).status(404);
+
+    const token = await owner.post('/v1/workspaces/:projectId/cli-token', { name: 'SESS-30 descriptor' }, { params: base });
+    token.status(201);
+    const tokenBody = token.json<any>();
+    const descriptorPath = '/v1/workspaces/:projectId/runtime/prompt-attachments/:attachmentId';
+    const descriptorOptions = {
+      params: { ...base, attachmentId },
+      query: { command_id: first.json<any>().prompt_id, part_index: 1 },
+    };
+    (await owner.get(descriptorPath, descriptorOptions)).status(403);
+    (await ctx.client.withBearer(tokenBody.secret_key, 'plain project PAT').get(descriptorPath, descriptorOptions)).status(403);
+
+    // A deployed target's lifecycle drain can claim the queued command before
+    // the fixture marks it running and finish it after (409
+    // attachment_command_not_running). Mark it again and read again.
+    const descriptor = await (async () => {
+      for (let attempt = 1; ; attempt++) {
+        await bindDatabaseSessionCredential(ctx.env, {
+          tokenId: tokenBody.token_id,
+          commandId: first.json<any>().prompt_id,
+          sessionId,
+          accountId: ctx.P.OWNER.accountId!,
+          projectId: project.id,
+        });
+        const read = await ctx.client.withBearer(tokenBody.secret_key, 'session PAT').get(descriptorPath, descriptorOptions);
+        if (read.statusCode !== 409 || attempt === 5) return read;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+    })();
+    descriptor.status(200);
+    const descriptorBody = descriptor.json<any>();
+    if (
+      descriptorBody.command_id !== first.json<any>().prompt_id ||
+      descriptorBody.attachment_id !== attachmentId ||
+      descriptorBody.part_index !== 1 ||
+      descriptorBody.filename !== 'eager.txt' ||
+      // #9380 keeps a text/plain upload as text/plain (before it, #8229 mapped
+      // every non-model-native MIME to application/octet-stream).
+      descriptorBody.mime !== 'text/plain' ||
+      descriptorBody.size_bytes !== bytes.length ||
+      !String(descriptorBody.target_path).endsWith(`/1-eager.txt`) ||
+      !String(descriptorBody.download_url).startsWith('http') ||
+      !/^[0-9a-f]{64}$/.test(descriptorBody.sha256)
+    ) throw new Error('Descriptor did not return canonical, verified command metadata');
+    (await ctx.client.withBearer(tokenBody.secret_key, 'session PAT').get(descriptorPath, {
+      ...descriptorOptions,
+      query: { command_id: first.json<any>().prompt_id, part_index: 0 },
+    })).status(404);
+    (await owner.del('/v1/workspaces/:projectId/cli-token/:tokenId', {
+      params: { ...base, tokenId: tokenBody.token_id },
+    })).status(200);
+  });
+  await ctx.step('a direct upload whose stored size differs from its declaration fails with 400, then completion returns 409', async () => {
+    const created = await owner.post(begin, { filename: 'short.txt', mime: 'text/plain', size: 3 }, { params: base });
+    created.status(201);
+    const handle = created.json<any>();
+    // Chunked mode rejects a wrong-sized chunk on the chunk route instead (413 above).
+    if (handle.upload.kind !== 'direct') return;
+    const stored = await fetch(handle.upload.url, { method: 'PUT', headers: handle.upload.headers, body: new TextEncoder().encode('four') });
+    if (!stored.ok) throw new Error(`direct Storage PUT returned ${stored.status}`);
+    const failed = { ...base, attachmentId: handle.attachment_id };
+    (await owner.post(complete, {}, { params: failed })).status(400).body().has('$.code', 'attachment_size_mismatch');
+    (await owner.post(complete, {}, { params: failed })).status(409).body().has('$.code', 'attachment_failed');
+  });
+  await ctx.step('remove an unfinished upload twice and keep it unavailable', async () => {
+    const created = await owner.post(begin, { filename: 'removed.txt', mime: 'text/plain', size: 1 }, { params: base }); created.status(201);
+    const unused = { ...base, attachmentId: created.json<any>().attachment_id };
+    (await owner.del(remove, { params: unused })).status(204);
+    (await owner.del(remove, { params: unused })).status(204);
+    (await owner.post(complete, {}, { params: unused })).status(404);
+  });
+  // The maintenance sweep then removes the object before its metadata. The local
+  // profile runs no maintenance worker, so the API integration test
+  // (integration-prompt-attachments.test.ts, "session delete releases references") owns that half.
+  await ctx.step('delete the session and release its attachment: no reference remains and the attachment is due for the next maintenance sweep', async () => {
+    (await owner.del('/v1/workspaces/:projectId/sessions/:sessionId', { params: { ...base, sessionId } })).status(200);
+    const retention = await readDatabasePromptAttachmentRetention(ctx.env, attachmentId);
+    if (retention.references !== 0 || !retention.due) throw new Error(`session delete kept the attachment: ${JSON.stringify(retention)}`);
+  });
+});
+
+const attachmentNames = ['README.md', 'probe.ts', 'probe.zip', 'probe.png'];
+const promptText = 'SESS-27 staged mixed attachment prompt';
+
+const stagedParts = [
+  { type: 'text', text: promptText },
+  {
+    type: 'file',
+    mime: 'text/markdown',
+    filename: 'README.md',
+    url: 'data:text/markdown;base64,IyBBdHRhY2htZW50IHByb2JlCg==',
+  },
+  {
+    type: 'file',
+    mime: 'application/typescript',
+    filename: 'probe.ts',
+    url: 'data:application/typescript;base64,ZXhwb3J0IGNvbnN0IGF0dGFjaG1lbnRQcm9iZSA9IHRydWU7Cg==',
+  },
+  {
+    type: 'file',
+    mime: 'application/zip',
+    filename: 'probe.zip',
+    url: 'data:application/zip;base64,UEsDBAoAAAAAAF0lIl1/dU9UEwAAABMAAAAJABwAUkVBRE1FLm1kVVQJAAP6W5dq+luXanV4CwABBPUBAAAEFAAAACMgQXR0YWNobWVudCBwcm9iZQpQSwMECgAAAAAAXSUiXVJLTVolAAAAJQAAAAgAHABwcm9iZS50c1VUCQAD+luXavpbl2p1eAsAAQT1AQAABBQAAABleHBvcnQgY29uc3QgYXR0YWNobWVudFByb2JlID0gdHJ1ZTsKUEsBAh4DCgAAAAAAXSUiXX91T1QTAAAAEwAAAAkAGAAAAAAAAQAAAKSBAAAAAFJFQURNRS5tZFVUBQAD+luXanV4CwABBPUBAAAEFAAAAFBLAQIeAwoAAAAAAF0lIl1SS01aJQAAACUAAAAIABgAAAAAAAEAAACkgVYAAABwcm9iZS50c1VUBQAD+luXanV4CwABBPUBAAAEFAAAAFBLBQYAAAAAAgACAJ0AAAC9AAAAAAA=',
+  },
+  {
+    type: 'file',
+    mime: 'image/png',
+    filename: 'probe.png',
+    url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  },
+];
+
+flow(
+  'SESS-27',
+  {
+    domain: 'sessions',
+    requires: ['database'],
+    timeoutMs: 300_000,
+    routes: [
+      'POST /v1/workspaces/:projectId/sessions/:sessionId/prompts',
+      'GET /v1/workspaces/:projectId/sessions/:sessionId/prompts',
+    ],
+  },
+  async (ctx) => {
+    const project = await ctx.fixtures.project();
+    const owner = ctx.client.as(ctx.P.OWNER);
+    const seed = () =>
+      createDatabaseSession(ctx.env, {
+        projectId: project.id,
+        accountId: ctx.P.OWNER.accountId!,
+        userId: ctx.P.OWNER.userId!,
+        platinumRegion: 'eu-west',
+      });
+    const sessionId = await seed();
+    const retrySessionId = await seed();
+    ctx.track('session', sessionId, { projectId: project.id });
+    ctx.track('session', retrySessionId, { projectId: project.id });
+    const prompts = '/v1/workspaces/:projectId/sessions/:sessionId/prompts';
+    const inbox = async (id: string) => {
+      const r = await owner.get(prompts, { params: { projectId: project.id, sessionId: id } });
+      r.status(200);
+      return (r.json<any>()?.prompts ?? []) as any[];
+    };
+
+    await ctx.step(
+      'send a first prompt with Markdown, source, ZIP, and PNG parts before the box exists -> 202',
+      async () => {
+        (await owner.post(
+          prompts,
+          { client_message_id: 'SESS-27-first', parts: stagedParts },
+          { params: { projectId: project.id, sessionId } },
+        )).status(202);
+      },
+    );
+
+    await ctx.step(
+      'read the prompt inbox -> the row carries the accepted text, a durable prompt_id and a live lifecycle state',
+      async () => {
+        const prompt = (await inbox(sessionId)).find((row) => row.client_message_id === 'SESS-27-first');
+        if (!prompt) throw new Error('the first prompt was not readable from the inbox');
+        if (prompt.text !== promptText) {
+          throw new Error(`the first prompt text changed: ${String(prompt.text)}`);
+        }
+        if (!['queued', 'delivering', 'waiting', 'failed'].includes(prompt.state)) {
+          throw new Error(`the first prompt has an invalid state: ${String(prompt.state)}`);
+        }
+        if (typeof prompt.prompt_id !== 'string' || prompt.prompt_id.length === 0) {
+          throw new Error('the first prompt has no durable prompt_id');
+        }
+        const serialized = JSON.stringify(prompt);
+        for (const name of attachmentNames) {
+          if (!serialized.includes(name)) throw new Error(`the inbox row lost the attachment ${name}`);
+        }
+      },
+    );
+
+    await ctx.step(
+      'send a remote ZIP -> 400, no partial prompt, and a valid retry on the same session is accepted',
+      async () => {
+        const rejected = await owner.post(
+          prompts,
+          {
+            client_message_id: 'SESS-27-remote-zip',
+            parts: [
+              { type: 'text', text: 'SESS-27 rejected remote ZIP' },
+              {
+                type: 'file',
+                mime: 'application/zip',
+                filename: 'remote.zip',
+                url: 'https://files.example.test/remote.zip',
+              },
+            ],
+          },
+          { params: { projectId: project.id, sessionId: retrySessionId } },
+        );
+        rejected
+          .status(400)
+          .body()
+          .matches('$.error', /must be uploaded before it can be sent/);
+        if ((await inbox(retrySessionId)).length !== 0) {
+          throw new Error('a rejected remote ZIP created a partial prompt');
+        }
+
+        (await owner.post(
+          prompts,
+          { client_message_id: 'SESS-27-retry', parts: [{ type: 'text', text: 'SESS-27 valid retry' }] },
+          { params: { projectId: project.id, sessionId: retrySessionId } },
+        )).status(202);
+        if ((await inbox(retrySessionId)).length !== 1) {
+          throw new Error('the valid retry did not store exactly one prompt');
+        }
+      },
+    );
+  },
+);

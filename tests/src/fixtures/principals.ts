@@ -1,0 +1,208 @@
+/**
+ * Principal matrix provisioning against a live target.
+ *
+ * Global principals (provisioned once per run): OWNER, NONMEMBER, PAT_ACCT, ANON.
+ * Each gets a synthesized Supabase user (service-role admin create+confirm) and a
+ * real JWT (password grant) that renews itself before it expires (see
+ * supabase-session.ts). No account is created at sign-up (Workspaces D3): each
+ * principal that needs one gets it explicitly through POST /v1/accounts
+ * (`createAccountFor`), and its `accountId` is the id that call returns.
+ *
+ * Team-scoped principals (ADMIN, MEMBER, the M_ project roles, BILLING, AUDITOR,
+ * RO_ADMIN, DENY_USER) are per-team-account, so they're provisioned by the
+ * `team()` fixture inside the flows that exercise them — not globally.
+ */
+import { Client, expectApi, mintAccountToken } from '../core/client';
+import type { Env } from '../core/env';
+import { log } from '../core/log';
+import type { Principal, Principals } from '../core/types';
+import { subscribe } from './billing';
+import { retryBootstrapCreate } from './transient';
+import { adminCreateUser, adminDeleteUser, passwordGrantSession, refreshGrant, type AdminUser } from './supabase';
+import { SupabaseSessionAuth } from './supabase-session';
+
+export interface Provisioned {
+  principals: Partial<Principals>;
+  runAccountIds: string[];
+  supabaseUserIds: string[];
+}
+
+export const PASSWORD = 'Ke2e-passw0rd-Aa1!';
+
+export interface SynthUser {
+  user: AdminUser;
+  /** The principal's credential. `session.token` is always the current JWT. */
+  session: SupabaseSessionAuth;
+  principal: Principal;
+}
+
+/** Create+confirm a Supabase user and exchange for a self-renewing JWT. */
+export async function synthUser(env: Env, label: string, runId: string): Promise<SynthUser> {
+  const email = `e2e-${runId}-${label.toLowerCase()}-${Math.random().toString(36).slice(2, 7)}@${env.testEmailDomain}`;
+  return synthUserWithEmail(env, email, label);
+}
+
+/**
+ * Create+confirm a Supabase user with a SPECIFIC email, then exchange for a JWT.
+ *
+ * The default `synthUser` mints a random email, which is fine for synthesized
+ * members but blocks the invite accept/decline lifecycle: an invite is
+ * addressed to an exact email, and the accept/decline handlers reject any
+ * caller whose email doesn't match. Passing the email in lets a flow create
+ * the invite FIRST (for an address with no Kortix user yet), then mint the
+ * matching identity to act as the addressee.
+ */
+export async function synthUserWithEmail(
+  env: Env,
+  email: string,
+  label: string,
+): Promise<SynthUser> {
+  const user = await adminCreateUser(env, email, PASSWORD);
+  const grant = await passwordGrantSession(env, email, PASSWORD);
+  // A run outlives the 1 h access token, so the principal carries its session,
+  // not a token string: the Client renews it before any request that would
+  // otherwise leave with an expired JWT.
+  const session = new SupabaseSessionAuth({
+    label,
+    grant,
+    refresh: (refreshToken) => refreshGrant(env, refreshToken),
+  });
+  const principal: Principal = {
+    label,
+    auth: session,
+    email,
+    userId: user.id,
+    // No account yet: `createAccountFor` sets it when the fixture needs one.
+    accountId: undefined,
+  };
+  return { user, session, principal };
+}
+
+/**
+ * Create an account owned by `principal` (POST /v1/accounts) and record its id
+ * on the principal. The explicit replacement for the personal account sign-up
+ * used to create: nothing creates an account implicitly any more.
+ */
+export async function createAccountFor(env: Env, principal: Principal, name: string): Promise<string> {
+  const client = new Client(env.apiUrl).as(principal);
+  const created = await retryBootstrapCreate(`account create (${principal.label})`, async (attempt) => {
+    const r = await client.post('/v1/accounts', { name: attempt > 1 ? `${name}-r${attempt}` : name });
+    expectApi(r, `account create (${principal.label})`, 201);
+    const id = r.json<{ account_id?: string }>()?.account_id;
+    if (!id) throw new Error(`account create returned no account_id: ${r.text()}`);
+    return id;
+  });
+  principal.accountId = created;
+  return created;
+}
+
+/**
+ * Decide whether a Stripe funding failure sinks the run.
+ *
+ * When `stripe` is a declared capability the run EXPECTS funding to work, and
+ * every flow requiring `funded` (the largest capability group in the suite)
+ * silently degrades to `skip` if it does not. Under `--require-all` that is a
+ * red reported ~75 minutes later by a run that was doomed in its first minute.
+ * So: fatal by default on a Stripe-capable target, soft on a local profile
+ * without Stripe, and `KE2E_FUNDING_OPTIONAL=1` restores the old soft-fail.
+ */
+export function fundingFailureIsFatal(
+  env: Pick<Env, 'capabilities'>,
+  vars: Record<string, string | undefined> = process.env,
+): boolean {
+  if (!env.capabilities.stripe) return false;
+  const optional = vars.KE2E_FUNDING_OPTIONAL;
+  return !(optional === '1' || optional === 'true');
+}
+
+/** The exact message a fatal funding failure raises. */
+export function fundingFailureMessage(cause: unknown): string {
+  return (
+    'OWNER funding failed — every flow requiring the `funded` capability cannot run. ' +
+    'Failing fast now instead of reporting the skips at the end of the run. ' +
+    'Set KE2E_FUNDING_OPTIONAL=1 to downgrade this to a warning. ' +
+    `Cause: ${(cause as Error)?.message ?? cause}`
+  );
+}
+
+async function provisionOwner(
+  env: Env,
+  runId: string,
+): Promise<{ owner: SynthUser; patAcctSecret: string | undefined }> {
+  const owner = await synthUser(env, 'OWNER', runId);
+  // The OWNER's account, created explicitly (no account exists at sign-up).
+  // Funding and the PAT mint must follow it, not race it.
+  await createAccountFor(env, owner.principal, `e2e-${runId}-owner`);
+  const ownerClient = new Client(env.apiUrl).as(owner.principal);
+  // Fresh name per attempt: if a laundered 5xx hid a committed create, the
+  // orphan token is inert (revoked by gc) and the retry cannot 409 on it.
+  const { secret_key: patAcctSecret } = await retryBootstrapCreate('owner PAT mint', (attempt) =>
+    mintAccountToken(ownerClient, `e2e-${runId}-owner-bootstrap${attempt > 1 ? `-r${attempt}` : ''}`),
+  );
+
+  // Fund the OWNER's account so flows aren't blocked by the free-tier
+  // 1-project / 402 limits — real Stripe test-mode subscribe → paid tier + credits.
+  if (env.capabilities.stripe) {
+    try {
+      await subscribe(env, ownerClient, owner.principal.accountId!);
+      env.capabilities.funded = true;
+      log.step(`provision: OWNER ${owner.principal.accountId} funded (pro tier + credits)`);
+    } catch (err) {
+      if (fundingFailureIsFatal(env)) throw new Error(fundingFailureMessage(err));
+      log.warn(
+        `provision: OWNER funding failed — paid-tier flows will hit project_limit/402: ${(err as Error)?.message ?? err}`,
+      );
+    }
+  }
+  return { owner, patAcctSecret };
+}
+
+export async function provisionMatrix(env: Env, runId: string): Promise<Provisioned> {
+  const supabaseUserIds: string[] = [];
+
+  // NONMEMBER depends on nothing in the OWNER chain (create → bootstrap PAT →
+  // Stripe subscribe), so it runs beside it instead of after it. allSettled,
+  // not Promise.all: a rejected OWNER chain must not strand a created
+  // NONMEMBER as an unreclaimed Supabase user.
+  const [ownerSettled, nonmemberSettled] = await Promise.allSettled([
+    provisionOwner(env, runId),
+    // NONMEMBER owns an account of its own, never OWNER's: the "someone else's
+    // workspace" principal. Explicit, as nothing is created at sign-up.
+    synthUser(env, 'NONMEMBER', runId).then(async (u) => {
+      await createAccountFor(env, u.principal, `e2e-${runId}-nonmember`);
+      return u;
+    }),
+  ]);
+
+  if (ownerSettled.status === 'rejected') {
+    if (nonmemberSettled.status === 'fulfilled') {
+      await adminDeleteUser(env, nonmemberSettled.value.user.id).catch(() => undefined);
+    }
+    throw ownerSettled.reason;
+  }
+  if (nonmemberSettled.status === 'rejected') {
+    await adminDeleteUser(env, ownerSettled.value.owner.user.id).catch(() => undefined);
+    throw nonmemberSettled.reason;
+  }
+
+  const { owner, patAcctSecret } = ownerSettled.value;
+  const nonmember = nonmemberSettled.value;
+  supabaseUserIds.push(owner.user.id, nonmember.user.id);
+
+  const principals: Partial<Principals> = {
+    OWNER: owner.principal,
+    NONMEMBER: nonmember.principal,
+    ANON: { label: 'ANON', auth: { mode: 'none' } },
+    accountId: owner.principal.accountId!,
+  };
+  if (patAcctSecret) {
+    principals.PAT_ACCT = {
+      label: 'PAT_ACCT',
+      auth: { mode: 'bearer', token: patAcctSecret },
+      accountId: owner.principal.accountId,
+      userId: owner.principal.userId,
+    };
+  }
+
+  return { principals, runAccountIds: [], supabaseUserIds };
+}

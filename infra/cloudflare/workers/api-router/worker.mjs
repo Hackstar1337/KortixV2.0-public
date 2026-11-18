@@ -1,0 +1,432 @@
+// Kortix API + gateway router — the blue/green cutover switch in front of both
+// public services. One worker per env handles BOTH hostnames:
+//
+//   api.kortix.com          → API      → EKS | EU ECS | US ECS | eu-west-2 ECS   (ACTIVE_BACKEND)
+//   gateway.kortix.com      → gateway  → EKS | EU ECS | US ECS   (GATEWAY_ACTIVE_BACKEND)
+//   (staging-/dev- variants route to the "staging"/"dev" worker envs)
+//
+// The service is chosen by hostname (anything containing "gateway" is the LLM
+// gateway); each service has its OWN active-backend var + origin pair, so the
+// API and the gateway can be flipped or rolled back INDEPENDENTLY from this one
+// router with no DNS change. Both backends of a service run the same image
+// against the same DB, so a flip is safe (background-worker leadership is a
+// single global DB lease — see apps/api/src/shared/leader-election.ts — so only
+// one side ever runs cron). Flipping is instant and instantly reversible.
+const STRICT_TRANSPORT_SECURITY = 'max-age=31536000';
+const DEFAULT_MAINTENANCE = {
+  level: 'none',
+  title: '',
+  message: '',
+  startTime: null,
+  endTime: null,
+  statusUrl: null,
+  affectedServices: [],
+  updatedAt: new Date(0).toISOString(),
+};
+// Origin errors are NEVER rewritten. Until 2026-08-24 this worker replaced
+// every origin 502/503/504 with a synthetic "Service maintenance" 503, which
+// hid the real failure from users, from OpenCode's retry classifier and from
+// whoever was debugging: a gateway content-encoding bug surfaced on dev as
+// "Kortix is temporarily unavailable" for days while the gateway logged 200s.
+// A blocking maintenance response now comes ONLY from an explicit operator
+// switch (maintenanceOverride). Everything the origin says passes through with
+// its status, body and headers intact; only an origin that cannot be reached
+// at all gets a synthetic response, and that one names itself.
+const WEBHOOK_RELAY_USER_AGENT = 'Kortix-Webhook-Relay/1.0';
+const SCIM_RELAY_USER_AGENT = 'Kortix-SCIM-Relay/1.0';
+const SCIM_INGRESS_PATH = /^\/scim\/v2\/accounts\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:Users|Groups|ServiceProviderConfig|ResourceTypes|Schemas)(?:\/[^/]+)?\/?$/i;
+
+// api-yolo.kortix.com served the retired per-member YOLO usage endpoint; the
+// feature is gone from the code and its tunnel origin is dead, yet the host
+// still sits on a proxied cfargotunnel DNS record that answers Cloudflare
+// 530 / error 1033 on every path — a permanent error page on a host that is
+// not broken, it is gone. The prod route list rides a Worker route over that
+// record (a zone route, never a custom_domain: the record stays the zone
+// operator's to retire) so requests land HERE, and every one is answered
+// 410 Gone at the edge with no origin fetch.
+const RETIRED_YOLO_HOST = 'api-yolo.kortix.com';
+
+function retiredYoloResponse(request) {
+  const message =
+    'Kortix retired the per-member YOLO usage endpoint that api-yolo.kortix.com served. There is no backend behind this host; requests are not kept.';
+  const body =
+    request.method === 'HEAD'
+      ? null
+      : JSON.stringify({
+          error: { message, type: 'retired_endpoint', code: 'retired_endpoint' },
+          message,
+          code: 'retired_endpoint',
+        });
+  return addSecurityHeaders(
+    new Response(body, {
+      status: 410,
+      headers: new Headers({
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      }),
+    }),
+  );
+}
+
+// The one synthetic error this worker still produces: the origin fetch threw
+// (DNS, TLS, connection refused, timeout). 503 + Retry-After marks it
+// transient for retrying clients; 503 rather than 502 because Cloudflare
+// rewrites a 502/504 body into its HTML error page and this JSON must reach
+// the client. There is deliberately no x-request-id: no origin request ran.
+function originUnreachableResponse(isGateway, request, reason) {
+  const origin = request.headers.get('Origin');
+  const headers = new Headers({
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+    'Retry-After': '30',
+    'X-Origin-Status': 'fetch-error',
+  });
+  if (origin) {
+    headers.set('Access-Control-Allow-Origin', origin);
+    headers.set('Access-Control-Allow-Credentials', 'true');
+    headers.set('Vary', 'Origin');
+  }
+  const message = `Kortix ${isGateway ? 'gateway' : 'API'} origin is unreachable: ${reason}`;
+  return addSecurityHeaders(
+    Response.json(
+      {
+        error: { message, type: 'origin_unreachable', code: 'origin_unreachable' },
+        message,
+        code: 'origin_unreachable',
+        retry_after_seconds: 30,
+      },
+      { status: 503, headers },
+    ),
+  );
+}
+
+function addSecurityHeaders(response) {
+  const headers = response.headers;
+  headers.set('Strict-Transport-Security', STRICT_TRANSPORT_SECURITY);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  if (!headers.has('Referrer-Policy')) headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // JSON is never framed or rendered. HTML keeps the origin's own framing
+  // headers: the /v1/p/* preview proxy strips them on purpose so the web app
+  // can frame a sandbox page.
+  if ((headers.get('Content-Type') || '').includes('application/json')) {
+    headers.set('X-Frame-Options', 'DENY');
+    if (!headers.has('Content-Security-Policy')) {
+      headers.set('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+    }
+  }
+  return response;
+}
+
+function isReadOnlyRequest(request) {
+  return (
+    request.method === 'GET' ||
+    request.method === 'HEAD' ||
+    request.method === 'OPTIONS'
+  );
+}
+
+function isWebhookIngressRequest(request, url) {
+  if (request.method !== 'POST') return false;
+  return (
+    url.pathname.startsWith('/v1/webhooks/') ||
+    url.pathname.startsWith('/v1/billing/webhook/') ||
+    url.pathname.startsWith('/v1/billing/webhooks/') ||
+    url.pathname === '/v1/connectors/webhook/pipedream'
+  );
+}
+
+// CORS preflights answered at the edge. A browser caches a preflight per URL,
+// so every new project, session or query string paid a full origin round trip
+// (0.24–1.0 s measured 2026-09-27) before the real request could start. The
+// API's CORS policy is one middleware on every route (apps/api/src/middleware/
+// cors.ts), so its answer depends only on the host, the Origin and the
+// requested method + headers. The first preflight per key still goes to the
+// API, which stays the only source of the policy; its answer is kept here for
+// the same 10 minutes the API grants browsers. A refusal is never kept.
+const PREFLIGHT_EDGE_TTL_SECONDS = 600;
+
+function edgeCache() {
+  return typeof caches !== 'undefined' && caches?.default ? caches.default : null;
+}
+
+function preflightCacheKey(request, url) {
+  const origin = request.headers.get('Origin');
+  const method = request.headers.get('Access-Control-Request-Method');
+  if (request.method !== 'OPTIONS' || !origin || !method) return null;
+  const headers = (request.headers.get('Access-Control-Request-Headers') || '')
+    .split(',')
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(',');
+  const key = new URL(`https://${url.hostname}/__kortix_preflight__`);
+  key.searchParams.set('origin', origin);
+  key.searchParams.set('method', method.toUpperCase());
+  key.searchParams.set('headers', headers);
+  return new Request(key.toString(), { method: 'GET' });
+}
+
+async function cachedPreflight(key) {
+  const cache = edgeCache();
+  if (!cache || !key) return null;
+  const hit = await cache.match(key).catch(() => undefined);
+  if (!hit) return null;
+  const response = new Response(null, { status: hit.status, headers: hit.headers });
+  response.headers.delete('Cache-Control');
+  response.headers.set('X-Kortix-Preflight', 'edge');
+  return addSecurityHeaders(response);
+}
+
+async function keepPreflight(key, request, response) {
+  const cache = edgeCache();
+  if (!cache || !key) return;
+  const origin = request.headers.get('Origin');
+  if (response.status !== 204 && response.status !== 200) return;
+  if (response.headers.get('Access-Control-Allow-Origin') !== origin) return;
+  const stored = new Response(null, { status: response.status, headers: response.headers });
+  stored.headers.set('Cache-Control', `public, max-age=${PREFLIGHT_EDGE_TTL_SECONDS}`);
+  await cache.put(key, stored).catch(() => {});
+}
+
+// The one write freeze: an operator sets MAINTENANCE_LEVEL_OVERRIDE=blocking on
+// this worker and redeploys it. It reads nothing per request. Until 2026-11 the
+// worker also fetched kortix.com/api/maintenance/edge (Vercel Edge Config)
+// before every write: ~115,000 Vercel function calls a day for a level no
+// release or workflow set. The admin "Full lockdown" level now locks the web
+// app only (apps/web middleware); it does not stop API or gateway writes.
+function maintenanceOverride(env) {
+  if (env.MAINTENANCE_LEVEL_OVERRIDE !== 'blocking') return null;
+  return {
+    ...DEFAULT_MAINTENANCE,
+    level: 'blocking',
+    title: env.MAINTENANCE_TITLE_OVERRIDE || 'Scheduled maintenance',
+    message:
+      env.MAINTENANCE_MESSAGE_OVERRIDE ||
+      'Kortix is temporarily unavailable for maintenance.',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function maintenanceResponse(config, isGateway, request) {
+  const origin = request.headers.get('Origin');
+  const headers = new Headers({
+    'Cache-Control': 'no-store',
+    'Content-Type': 'application/json',
+    'Retry-After': '30',
+    'X-Maintenance-Mode': 'blocking',
+  });
+  if (origin) {
+    headers.set('Access-Control-Allow-Credentials', 'true');
+    headers.set('Access-Control-Allow-Origin', origin);
+    headers.set('Vary', 'Origin');
+  }
+
+  return addSecurityHeaders(
+    new Response(
+      JSON.stringify({
+        // `error` is an OBJECT, not a string: the AI-SDK gateway client
+        // (@ai-sdk/gateway, the default sandbox LLM path since #6631) parses
+        // non-2xx bodies against `{ error: { message, type, code } }`. The old
+        // string shape failed that schema, so every laundered origin 5xx
+        // surfaced in a session as the information-free "Invalid error
+        // response format: Gateway request failed" instead of a retryable
+        // maintenance signal (SESS-23, run 32330628092). The MAINTENANCE_MODE
+        // token stays in `type`/`code`, so every substring detector still
+        // fires; header detection (`x-maintenance-mode`) is unchanged.
+        error: {
+          message:
+            config.message ||
+            'Kortix is temporarily unavailable for maintenance.',
+          type: 'MAINTENANCE_MODE',
+          code: 'MAINTENANCE_MODE',
+        },
+        message:
+          config.message ||
+          'Kortix is temporarily unavailable for maintenance.',
+        maintenance: config,
+      }),
+      { status: 503, headers },
+    ),
+  );
+}
+
+const INTERNAL_EDGE_HEADER = 'x-kortix-internal-edge-key';
+
+// `/internal/*` is the gateway-to-API control plane. The public API host must
+// not serve it to anyone but the gateway. When INTERNAL_EDGE_KEY is set, the
+// gateway proves itself with that key (KORTIX_INTERNAL_EDGE_KEY on the gateway)
+// and every other caller gets 404. Unset keeps the pre-key behaviour so the
+// worker can ship before the gateway env does: set the gateway env first.
+// The API matches the DECODED path, so `/%69nternal/` must be gated too. The
+// key is forwarded: the API checks it again, because the backend origins are
+// public hostnames that never pass through this Worker.
+function isInternalPath(pathname) {
+  let path = pathname;
+  try {
+    path = decodeURIComponent(pathname);
+  } catch {
+    // Malformed escapes: gate on the raw path.
+  }
+  return path.toLowerCase().startsWith('/internal/');
+}
+
+function internalEdgeDenied(env, request, url) {
+  if (!env.INTERNAL_EDGE_KEY || !isInternalPath(url.pathname)) return false;
+  const given = request.headers.get(INTERNAL_EDGE_HEADER) ?? '';
+  const want = env.INTERNAL_EDGE_KEY;
+  let diff = given.length ^ want.length;
+  for (let i = 0; i < want.length; i++) diff |= (given.charCodeAt(i) || 0) ^ want.charCodeAt(i);
+  return diff !== 0;
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.hostname === RETIRED_YOLO_HOST) return retiredYoloResponse(request);
+    const isGateway = url.hostname.includes('gateway');
+
+    if (url.protocol === 'https:' && url.pathname === '/.well-known/security.txt' &&
+        (request.method === 'GET' || request.method === 'HEAD')) {
+      return addSecurityHeaders(new Response(request.method === 'HEAD' ? null :
+        `Contact: mailto:security@kortix.com\nExpires: 2027-04-25T00:00:00Z\nPreferred-Languages: en\nCanonical: ${url.origin}/.well-known/security.txt\n`, {
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      }));
+    }
+
+
+    const active =
+      (isGateway ? env.GATEWAY_ACTIVE_BACKEND : env.ACTIVE_BACKEND) || 'ecs-fargate';
+    const backends = isGateway
+      ? {
+          eks: env.GATEWAY_BACKEND_EKS,
+          'ecs-fargate': env.GATEWAY_BACKEND_ECS_FARGATE,
+          'us-east-2': env.GATEWAY_BACKEND_US_EAST_2,
+          'eu-west-2': env.GATEWAY_BACKEND_EU_WEST_2,
+        }
+      : {
+          eks: env.BACKEND_EKS,
+          'ecs-fargate': env.BACKEND_ECS_FARGATE,
+          'us-east-2': env.BACKEND_US_EAST_2,
+          'eu-west-2': env.BACKEND_EU_WEST_2,
+        };
+
+    const backendUrl = backends[active];
+    if (!backendUrl) {
+      const svc = isGateway ? 'gateway' : 'api';
+      return new Response(`Invalid ${svc} backend configuration: ${active}`, {
+        status: 500,
+      });
+    }
+
+    if (url.protocol !== 'https:') {
+      url.protocol = 'https:';
+      return new Response(null, {
+        status: 308,
+        headers: {
+          Location: url.toString(),
+        },
+      });
+    }
+
+    if (!isGateway && internalEdgeDenied(env, request, url)) {
+      return addSecurityHeaders(Response.json({ error: 'not found' }, { status: 404 }));
+    }
+
+    const targetUrl = new URL(url.pathname + url.search, backendUrl);
+    const preflightKey = isGateway ? null : preflightCacheKey(request, url);
+    const edgePreflight = await cachedPreflight(preflightKey);
+    if (edgePreflight) return edgePreflight;
+
+    // The write freeze refuses writes only; reads always reach the origin.
+    const maintenance = isReadOnlyRequest(request) ? null : maintenanceOverride(env);
+    const isMaintenanceConfigWrite =
+      !isGateway &&
+      request.method === 'PUT' &&
+      url.pathname === '/v1/system/maintenance';
+
+    if (
+      maintenance?.level === 'blocking' &&
+      !isReadOnlyRequest(request) &&
+      !isMaintenanceConfigWrite
+    ) {
+      return maintenanceResponse(maintenance, isGateway, request);
+    }
+
+    // `manual` so backend 3xx responses are passed straight through to the
+    // browser. With `follow`, the worker would chase a browser-facing redirect
+    // server-side (no client cookies) — e.g. the Slack OAuth callback's
+    // `302 → kortix.com/projects/...` got followed here, kortix.com bounced to
+    // /auth, and the worker returned that /auth HTML as a 200, so the browser
+    // never saw the redirect (blank page, URL stuck on the callback).
+    const originHeaders = new Headers(request.headers);
+    // AWSManagedRulesCommonRuleSet rejects a missing User-Agent before the API
+    // can verify the webhook signature. External webhook providers are not
+    // required to send this informational header. Supply a relay identity only
+    // on public POST webhook routes and only when the sender omitted the header.
+    if (
+      !isGateway &&
+      isWebhookIngressRequest(request, url) &&
+      !originHeaders.has('User-Agent')
+    ) {
+      originHeaders.set('User-Agent', WEBHOOK_RELAY_USER_AGENT);
+    }
+    // Entra also omits User-Agent during SCIM discovery and provisioning.
+    // Identify the relay before AWS WAF; the API still validates the original
+    // account-scoped bearer token on every request, including discovery.
+    if (
+      !isGateway &&
+      SCIM_INGRESS_PATH.test(url.pathname) &&
+      !originHeaders.get('User-Agent')?.trim()
+    ) {
+      originHeaders.set('User-Agent', SCIM_RELAY_USER_AGENT);
+    }
+    // The Workers runtime throws inside `new Request` when a GET or HEAD
+    // carries a body, and this construction sits outside the try/catch: the
+    // client got Cloudflare's bare "error code: 1101" 500 before the origin
+    // ever ran (reproduced on workerd at this construction). GET and HEAD
+    // bodies have no defined semantics; drop the body and the content-length
+    // that frames it, so the request reaches the origin and answers as a
+    // normal GET/HEAD.
+    const dropBody = request.method === 'GET' || request.method === 'HEAD';
+    if (dropBody) originHeaders.delete('content-length');
+    const modifiedRequest = new Request(targetUrl, {
+      method: request.method,
+      headers: originHeaders,
+      body: dropBody ? null : request.body,
+      redirect: 'manual',
+    });
+
+    // A GET or HEAD whose origin connection drops before any response is sent
+    // once more: it has no body and no side effect. A reset Cloudflare→ALB
+    // connection ("Network connection lost") failed staging release-gate
+    // flows on 2026-10-13. Never a mutating POST: the origin may already have run it.
+    // This POST only evaluates permissions; it does not mutate membership.
+    // Clone its body for each attempt so a consumed stream can be replayed.
+    const permissionBatch = !isGateway && request.method === 'POST' &&
+      /^\/v1\/accounts\/[0-9a-f-]{36}\/iam\/members\/[0-9a-f-]{36}\/effective:batch$/.test(url.pathname);
+    const attempts = dropBody || permissionBatch ? 2 : 1;
+    let response;
+    for (let attempt = 1; !response; attempt++) {
+      try {
+        response = await fetch(permissionBatch ? modifiedRequest.clone() : modifiedRequest);
+      } catch (error) {
+        if (attempt < attempts) continue;
+        return originUnreachableResponse(
+          isGateway,
+          request,
+          error instanceof Error && error.message ? error.message : 'fetch failed',
+        );
+      }
+    }
+    // Cloudflare attaches the accepted socket to response.webSocket. Creating
+    // a new Response drops that non-standard property and breaks the upgrade.
+    if (response.status === 101 || response.webSocket) {
+      return response;
+    }
+    if (preflightKey) await keepPreflight(preflightKey, request, response);
+    const newResponse = new Response(response.body, response);
+    newResponse.headers.delete('X-Backend');
+    newResponse.headers.delete('X-Backend-Service');
+    return addSecurityHeaders(newResponse);
+  },
+};

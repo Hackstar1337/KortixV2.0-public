@@ -1,0 +1,278 @@
+export interface AllowEntry {
+  method: string;
+  path: string;
+  reason: string;
+}
+
+/** One reason for all 11 drive-sync routes: the in-guest daemon's own sync surface. */
+const DRIVE_SYNC_REASON =
+  "session drive sync: called only by a session's own in-guest daemon with its session sandbox credential (the handler re-checks sandbox, session, project, account and live status against session_sandboxes, and the folders recorded for it), to keep the session's folders in sync on a provider without volume mounts. Not an end-user API route. Covered against the real routes in apps/api/src/__tests__/integration-drive-access-enforcement.test.ts and end to end through the daemon's real HTTP client in apps/kortix-sandbox-agent-server/src/__tests__/drive-sync.test.ts.";
+
+/** The drive-sync routes DRIVE_SYNC_REASON covers, as [method, path] pairs. */
+const DRIVE_SYNC_ROUTES: Array<[string, string]> = [
+  ["GET", "/v1/projects/:*/sessions/:*/drive-sync/mounts"],
+  ["GET", "/v1/projects/:*/sessions/:*/drive-sync/:*/head"],
+  ["GET", "/v1/projects/:*/sessions/:*/drive-sync/:*/files"],
+  ["GET", "/v1/projects/:*/sessions/:*/drive-sync/:*/files/stat"],
+  ["GET", "/v1/projects/:*/sessions/:*/drive-sync/:*/files/content"],
+  ["PUT", "/v1/projects/:*/sessions/:*/drive-sync/:*/files/content"],
+  ["POST", "/v1/projects/:*/sessions/:*/drive-sync/:*/files/upload"],
+  ["PUT", "/v1/projects/:*/sessions/:*/drive-sync/:*/files/upload/:*/blocks/:*"],
+  ["POST", "/v1/projects/:*/sessions/:*/drive-sync/:*/files/upload/:*/commit"],
+  ["POST", "/v1/projects/:*/sessions/:*/drive-sync/:*/files/move"],
+  ["DELETE", "/v1/projects/:*/sessions/:*/drive-sync/:*/files"],
+];
+
+/** One reason for all 9 setup routes: the self-hosted setup app. */
+const SETUP_REASON = "self-hosted setup app is intentionally not mounted when internal billing is enabled";
+
+/** The setup routes SETUP_REASON covers, as [method, path] pairs. */
+const SETUP_ROUTES: Array<[string, string]> = [
+  ["GET", "/v1/setup/health"],
+  ["GET", "/v1/setup/install-status"],
+  ["GET", "/v1/setup/sandbox-providers"],
+  ["GET", "/v1/setup/setup-status"],
+  ["GET", "/v1/setup/setup-wizard-step"],
+  ["GET", "/v1/setup/status"],
+  ["POST", "/v1/setup/bootstrap-owner"],
+  ["POST", "/v1/setup/setup-complete"],
+  ["POST", "/v1/setup/setup-wizard-step"],
+];
+
+const allowFor = (routes: Array<[string, string]>, reason: string): AllowEntry[] =>
+  routes.map(([method, path]) => ({ method, path, reason }));
+
+export const uncoveredAllow: AllowEntry[] = [
+    ...allowFor(DRIVE_SYNC_ROUTES, DRIVE_SYNC_REASON),
+  // Sales reconciliation (#11610): a machine route behind its own bearer
+  // (SALES_RECONCILIATION_TOKEN), not a user or PAT. Its paging, cursor and
+  // auth are proven in apps/api/src/accounts/sales-outbox.integration.test.ts.
+  {
+    method: "GET",
+    path: "/v1/system/confirmed-signups",
+    reason: "sales reconciliation export behind its own token; covered by sales-outbox.integration.test.ts",
+  },
+  // Routes of this cycle proven over real HTTP + PostgreSQL in apps/api's
+  // integration suites rather than a flow: the subscription ones read a
+  // connected ChatGPT/Claude plan (an external login the local profile has
+  // not got), and chat threads and space posts are session-principal routes
+  // (only an agent's box calls them).
+  {
+    method: "GET",
+    path: "/v1/accounts/:accountId/subscription-connections",
+    reason: "lists connected ChatGPT/Claude subscriptions (#11816); needs a real plan login; covered by integration-subscription-discovery-http.test.ts",
+  },
+  {
+    method: "POST",
+    path: "/v1/accounts/:accountId/subscription-connections/:connectionId/usage",
+    reason: "refreshes a connected plan's usage from its vendor (#11816); needs a real plan login; covered by integration-subscription-discovery-http.test.ts",
+  },
+  {
+    method: "POST",
+    path: "/v1/projects/:projectId/chat/threads",
+    reason: "only a session's own box starts a thread in its person's chat (#11712); covered by integration-chat-threads-http.test.ts",
+  },
+  {
+    method: "POST",
+    path: "/v1/projects/:projectId/spaces/:spaceId/posts",
+    reason: "an agent posts into a space for its person (#11783); session-principal only; covered by integration-space-posts-http.test.ts",
+  },
+  {
+    method: "PUT",
+    path: "/v1/projects/:projectId/spaces/:spaceId/tabs",
+    reason: "free space tabs behind the chat flag (#11712); covered by integration-space-tabs-http.test.ts",
+  },
+  // The CLI device-login (RFC 8628-style) routes. Covered by the CLI's own
+  // device flow rather than by a browser journey: start → poll → decide is a
+  // terminal handshake, and the CLI is not in the flow-runner matrix. They
+  // arrived with the CLI device-grant merge and, like the routes below, were
+  // absent from the committed manifest, so the gate never saw them.
+  {
+    method: "POST",
+    path: "/v1/cli/device/start",
+    reason: "CLI device login, step 1: exercised by `kortix login` (terminal handshake, no browser flow)",
+  },
+  {
+    method: "POST",
+    path: "/v1/cli/device/poll",
+    reason: "CLI device login, step 2: polled by `kortix login` until approved",
+  },
+  {
+    method: "POST",
+    path: "/v1/cli/device/decide",
+    reason: "CLI device login, step 3: approved in the CLI approval page; the CLI is not in the flow-runner matrix",
+  },
+  {
+    method: "GET",
+    path: "/v1/runtime-assets/entrypoint",
+    reason:
+      "DEBT, not a considered exemption, and NOT introduced by this branch. The route exists on the app but is absent from the committed tests/spec/routes.generated.json, so the coverage gate had never seen it; regenerating the manifest for the headless-auth routes surfaced it. It needs a flow from whoever owns runtime-assets. Recorded so a stale manifest cannot re-hide it.",
+  },
+  {
+    method: "HEAD",
+    path: "/v1/runtime-assets/entrypoint",
+    reason: "Same route as the GET above, same reason — surfaced by regenerating a stale manifest, not added here.",
+  },
+  {
+    method: "PATCH",
+    path: "/v1/auth/user",
+    reason:
+      "Headless profile-metadata write, the replacement for supabase.auth.updateUser({ data }). Covered at the unit level by apps/api/src/__tests__/unit-auth-user-metadata.test.ts (caller-bearer forwarding, .strict() refusal of a smuggled password/email, GoTrue error passthrough) and verified live against real GoTrue. No ke2e flow yet: the local test profile has no second confirmed user to attribute a metadata write to, and asserting it as the same user the flow already signs in as would test GoTrue, not us.",
+  },
+  {
+    method: "POST",
+    path: "/v1/auth/sign-in/sso",
+    reason:
+      "Enterprise SSO discovery. Cannot be flow-covered on the local profile: SAML is disabled there, so the route can only ever answer saml_provider_disabled — asserting that would pin the absence of a provider, not the behaviour. Unit-covered in unit-auth-headless.test.ts (redirect URL returned, 404 passthrough for a domain with no IdP). Needs a staging flow once an IdP exists.",
+  },
+  {
+    method: "POST",
+    path: "/v1/auth/mfa/factors",
+    reason:
+      "MFA enrol. Local Supabase ships MFA disabled (GOTRUE_MFA_TOTP_ENROLL_ENABLED=false), so the local profile cannot exercise it without changing Supabase config the profile does not own. Unit-covered in unit-auth-mfa.test.ts and verified end to end by hand against real GoTrue with TOTP enabled: enrol -> challenge -> verify with a generated code -> a token carrying aal2.",
+  },
+  {
+    method: "POST",
+    path: "/v1/auth/mfa/factors/:*/challenge",
+    reason: "MFA challenge — same reason as POST /v1/auth/mfa/factors: MFA is disabled on the local test profile's Supabase.",
+  },
+  {
+    method: "POST",
+    path: "/v1/auth/mfa/factors/:*/verify",
+    reason: "MFA verify — same reason as POST /v1/auth/mfa/factors. This is the leg that produces an aal2 session, which authorize() step 6 requires; verified by hand, not by the local profile.",
+  },
+  {
+    method: "DELETE",
+    path: "/v1/auth/mfa/factors/:*",
+    reason: "MFA unenrol — same reason as POST /v1/auth/mfa/factors.",
+  },
+  {
+    method: "GET",
+    path: "/v1/projects/:*/git/connection",
+    reason:
+      "DEBT, not a considered exemption, and NOT introduced by this branch. The route exists on the app but was missing from tests/spec/routes.generated.json, so the gate never saw it; regenerating the manifest for the headless-auth routes surfaced it. Nothing covers it — it needs a flow. This entry keeps the gap visible instead of letting a stale manifest re-hide it.",
+  },
+  {
+    method: "POST",
+    path: "/v1/admin/api/accounts/:*/members/:*/role",
+    reason:
+      "DEBT, not a considered exemption. The route has existed on the app for a while but was absent from tests/spec/routes.generated.json, so the gate never saw it; regenerating the manifest for the secret-grant route surfaced it. Nothing covers it — it needs a flow, and this entry exists so the gap stays visible instead of being re-hidden by a stale manifest.",
+  },
+  {
+    method: "POST",
+    path: "/v1/projects/provision-stream",
+    reason:
+      "SSE progress-stream sibling of the flow-covered POST /projects/provision (#6276 /new create page) — same provisioning engine and auth boundary; the JSON sibling carries the contract coverage",
+  },
+  {
+    method: "POST",
+    path: "/v1/platform/boot-timeline",
+    reason:
+      "sandbox-only telemetry sink called by the in-guest boot relay with a sandbox token; not an end-user API route",
+  },
+  {
+    method: "POST",
+    path: "/v1/platform/runtime-projection",
+    reason:
+      "sandbox-only projection sink: the in-guest daemon pushes its own /kortix/opencode/state document with a sandbox token, and the handler re-checks that token's sandbox against session_sandboxes (sandbox -> session -> account) before storing. Not an end-user API route — same class as /v1/platform/boot-timeline. Credential, scoping, gzip decoding and the decompressed size cap are covered black-box in apps/api/src/platform/routes/runtime-projection.test.ts; the SERVED side is flow-covered through the snapshot runtime leg in SESS-20.",
+  },
+  {
+    method: "PUT",
+    path: "/v1/connectors/projects/:*/connectors/:*/sensitive",
+    reason:
+      "connector-scoped runtime endpoint — called by the in-sandbox connector with its own token, not by end-user clients; the user-facing equivalent is flow-covered",
+  },
+  {
+    method: "DELETE",
+    path: "/v1/projects/:*/channels/teams/installation",
+    reason: "teams disconnect — manage-ACL teardown symmetric with the flow-covered connect",
+  },
+  {
+    method: "GET",
+    path: "/v1/projects/:*/channels/teams/manifest",
+    reason: "teams sideload manifest — read-only generated artifact",
+  },
+  {
+    method: "GET",
+    path: "/v1/channels/teams/identity/login/:*",
+    reason: "unauthenticated HTML redirect to the web teams-login page (identity link flow)",
+  },
+  {
+    method: "POST",
+    path: "/v1/channels/teams/identity/bind",
+    reason: "authed identity bind, hit from the web teams-login page — mirrors the slack identity bind",
+  },
+  {
+    method: "GET",
+    path: "/v1/projects/:*/channels/teams/file",
+    reason: "server-side file download proxy, exercised via the in-sandbox teams CLI, not end-user clients",
+  },
+  {
+    method: "POST",
+    path: "/v1/webhooks/teams/:*/messages",
+    reason: "Bot Framework BYO-bot inbound webhook — JWT-authed by Microsoft, same shape as the flow-covered managed /v1/webhooks/teams/messages",
+  },
+  {
+    method: "GET",
+    path: "/v1/webhooks/teams/oauth/callback",
+    reason: "Teams admin-consent OAuth callback — browser redirect from Microsoft (admin_consent+tenant), not an API client route; mirrors the slack oauth callback",
+  },
+  // `ALL` passthroughs. dump-routes.ts lists real `.all()` handlers since the
+  // one-contract wave; no flow can declare the method `ALL`, so each is listed
+  // here with the reason its concrete traffic is not a local flow.
+  ...["/v1/llm/*", "/v1/llm-gateway/*"].map((path) => ({
+    method: "ALL",
+    path,
+    reason: "LLM gateway bridge; flows declare its concrete routes (see externalRoutes)",
+  })),
+  {
+    method: "ALL",
+    path: "/v1/p/:sandboxId/:port/*",
+    reason: "sandbox preview proxy; needs a live cloud sandbox, which the local profile excludes",
+  },
+  ...["/:port", "/:port/*", "/file", "/file/*"].map((tail) => ({
+    method: "ALL",
+    path: `/v1/p/public-share/:token${tail}`,
+    reason: "public-share proxy into a live sandbox; needs a cloud sandbox, which the local profile excludes",
+  })),
+  ...["firecrawl", "serper", "tavily"].flatMap((provider) =>
+    [`/v1/router/${provider}`, `/v1/router/${provider}/*`].map((path) => ({
+      method: "ALL",
+      path,
+      reason: "provider passthrough to a third-party API; needs real provider keys, which the local profile excludes",
+    })),
+  ),
+  ...["context7", "gemini", "groq", "openai", "xai"].flatMap((provider) =>
+    [`/v1/router/${provider}`, `/v1/router/${provider}/*`].map((path) => ({
+      method: "ALL",
+      path,
+      reason: "retired provider passthrough: a 410 stub (apps/api/src/routes/retired.ts). No flow can declare ALL; RET-1 calls one and unit-retired-routes.test.ts covers every row",
+    })),
+  ),
+{ method: "POST", path: "/v1/projects/:*/transfer", reason: "project transfer between accounts (KRTX-1747): an end-user settings action, not a browser journey — covered against the real route table by apps/api/src/projects/routes/project-transfer.test.ts (gate order, error mapping), by the real-PostgreSQL movement suite apps/api/src/projects/lib/project-transfer.integration.test.ts (movement, role re-pointing, real-engine non-member deny, classification completeness), and exercised live in the PR sandbox" },
+];
+
+export const externalRoutes: AllowEntry[] = [
+  { method: "GET", path: "/v1/llm/models", reason: "llm-gateway standalone service (gateway-*.kortix.com), not in the main API manifest" },
+  { method: "GET", path: "/v1/llm/health", reason: "main-API bridge into the llm-gateway wildcard mount; exercised by GW-1b but not emitted by the static route manifest" },
+  { method: "GET", path: "/v1/llm/v1/models", reason: "main-API llm-gateway compatibility alias mounted behind the dynamic /v1/llm bridge" },
+  { method: "GET", path: "/v1/models", reason: "llm-gateway model-catalog alias" },
+  { method: "GET", path: "/v1/openai/models", reason: "llm-gateway OpenAI-compat catalog alias" },
+  { method: "POST", path: "/v1/chat/completions", reason: "llm-gateway chat completions" },
+  { method: "POST", path: "/v1/llm/chat/completions", reason: "llm-gateway chat completions alias" },
+  { method: "POST", path: "/v1/llm/v1/chat/completions", reason: "main-API llm-gateway OpenAI compatibility alias mounted behind the dynamic /v1/llm bridge" },
+  { method: "POST", path: "/v1/llm/messages", reason: "main-API bridge into the llm-gateway Anthropic Messages ingress" },
+  { method: "POST", path: "/v1/llm/v1/messages", reason: "main-API llm-gateway Anthropic compatibility alias mounted behind the dynamic /v1/llm bridge" },
+  { method: "POST", path: "/v1/openai/chat/completions", reason: "llm-gateway OpenAI-compat chat alias" },
+  { method: "POST", path: "/v1/messages", reason: "llm-gateway standalone service Anthropic-Messages ingress" },
+  { method: "POST", path: "/v1/responses", reason: "llm-gateway standalone service OpenAI Responses ingress" },
+  { method: "POST", path: "/v1/openai/messages", reason: "llm-gateway standalone service Anthropic-Messages ingress, OpenAI-compat-namespace alias" },
+  { method: "POST", path: "/v1/audio/transcriptions", reason: "llm-gateway standalone service speech-to-text" },
+  { method: "POST", path: "/v1/audio/speech", reason: "llm-gateway standalone service text-to-speech" },
+  { method: "GET", path: "/v1/audio/voices", reason: "llm-gateway standalone service voice list" },
+  { method: "POST", path: "/v1/llm/audio/transcriptions", reason: "main-API bridge into the llm-gateway speech-to-text route" },
+  { method: "POST", path: "/v1/llm/audio/speech", reason: "main-API bridge into the llm-gateway text-to-speech route" },
+  { method: "GET", path: "/v1/llm/audio/voices", reason: "main-API bridge into the llm-gateway voice list" },
+  ...allowFor(SETUP_ROUTES, SETUP_REASON),
+  { method: "POST", path: "/v1/webhooks/sandbox/platinum", reason: "mounted only when PLATINUM_WEBHOOK_SECRET is set; the cloud manifest profile sets none" },
+];

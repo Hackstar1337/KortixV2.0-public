@@ -1,0 +1,46 @@
+import type { ReapResult } from './sandbox-reaper';
+
+const DEFAULT_ACTIVE_TURN_RENEWAL_INTERVAL_MS = 20_000;
+const MIN_ACTIVE_TURN_RENEWAL_INTERVAL_MS = 5_000;
+const MAX_ACTIVE_TURN_RENEWAL_INTERVAL_MS = 30_000;
+
+type Reap = (
+  now?: Date,
+  dependencyOverrides?: Record<string, never>,
+  scope?: { sandboxIds?: readonly string[]; activeTurnsOnly?: boolean },
+) => Promise<ReapResult>;
+
+export interface ActiveTurnRenewalDependencies {
+  reap?: Reap;
+  now?: () => Date;
+  intervalMs?: () => number;
+  monotonicNowMs?: () => number;
+}
+
+export function activeTurnRenewalIntervalMs(
+  env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+): number {
+  const parsed = Number.parseInt(env.KORTIX_ACTIVE_TURN_RENEWAL_INTERVAL_MS ?? '', 10);
+  const configured = Number.isFinite(parsed) ? parsed : DEFAULT_ACTIVE_TURN_RENEWAL_INTERVAL_MS;
+  return Math.min(
+    MAX_ACTIVE_TURN_RENEWAL_INTERVAL_MS,
+    Math.max(MIN_ACTIVE_TURN_RENEWAL_INTERVAL_MS, configured),
+  );
+}
+
+async function defaultReap(
+  now?: Date,
+  dependencyOverrides?: Record<string, never>,
+  scope?: { sandboxIds?: readonly string[]; activeTurnsOnly?: boolean },
+): Promise<ReapResult> {
+  const { reapAndReconcileSandboxes } = await import('./sandbox-reaper');
+  return reapAndReconcileSandboxes(now, dependencyOverrides, scope);
+}
+
+/** Run one provider-neutral pass over rows that currently hold turn authority. */
+export async function runActiveTurnRenewal(
+  dependencies: ActiveTurnRenewalDependencies = {},
+): Promise<ReapResult> {
+  const reap = dependencies.reap ?? defaultReap;
+  return reap((dependencies.now ?? (() => new Date()))(), {}, { activeTurnsOnly: true });
+}

@@ -1,0 +1,173 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`shipped marketing route composition home retains its rendered sections, links and visuals 1`] = `
+{
+  "glyphs": [
+    "--brand:var(--foreground);mask-image:url(/media/landing/logos/notion.svg);mask-size:contain;mask-repeat:no-repeat;mask-position:center",
+    "--brand:var(--foreground);mask-image:url(/media/landing/logos/notion.svg);mask-size:contain;mask-repeat:no-repeat;mask-position:center",
+  ],
+  "headings": [
+    "The CompanyOS",
+    "Models and apps Kortix works with",
+    "Case studies. What runs on CompanyOS.",
+    "A science agent for researchers.",
+    "Autonomous fiber network design.",
+    "Every deal, evaluated by agents.",
+    "Autonomous software engineering.",
+    "Autonomous credit analysis.",
+    "Autonomous candidate research.",
+    "Autonomous AWS cost optimization.",
+    "Autonomous invoice matching.",
+    "Multiplayer. Company as code. Sovereign. The CompanyOS you own.",
+    "Multiplayer AIOne AI for the whole team.",
+    "Company as codeExtensible to the core.",
+    "Sovereign and openOwn your data and your infrastructure.",
+    "How Kortix works.One repo, every tool, any model, a computer per agent.",
+    "Keep one source of truth",
+    "Connect to everything",
+    "Run any model",
+    "Every agent gets its own computer",
+    "Ask for an app, get one",
+    "A workspace for your team.A framework underneath.",
+    "kortix.yaml",
+    "pi coding agent",
+    "@kortix/sdk",
+    "@kortix/ui",
+    "Give it an outcome. Agents run it 24/7.End to end, for every team.",
+    "The books reconciled, not just summarized.",
+    "Everything IT needs to say yes.Agents for the whole team, without giving up control.",
+    "Access control",
+    "Guardrails",
+    "Full audit trail",
+    "Isolated machines",
+    "Single sign-on",
+    "No lock-in",
+    "The questions people ask.Answered plainly.",
+  ],
+  "links": [
+    [
+      "Start for free",
+      "/auth",
+    ],
+    [
+      "Learn moreabout Multiplayer AI",
+      "/multiplayer",
+    ],
+    [
+      "Learn moreabout Company as code",
+      "/framework",
+    ],
+    [
+      "Learn moreabout Sovereign and open",
+      "/sovereign",
+    ],
+    [
+      "See the architecture",
+      "/framework",
+    ],
+    [
+      "Synthetic report",
+      "/use-cases/synthetic-report",
+    ],
+    [
+      "Security at Kortix",
+      "/security",
+    ],
+    [
+      "write to the team",
+      "/contact",
+    ],
+  ],
+  "sections": [
+    "hero",
+    "",
+    "works-with",
+    "case-studies",
+    "pillars",
+    "how-it-works",
+    "framework",
+    "use-cases",
+    "trust",
+    "faq",
+  ],
+  "securityContent": undefined,
+  "visuals": [
+    [
+      "/media/landing/logos/color/claude.svg",
+      "",
+      null,
+    ],
+    [
+      "/media/landing/logos/color/claude.svg",
+      "",
+      null,
+    ],
+    [
+      "/media/landing/logos/color/slack.svg",
+      "",
+      null,
+    ],
+    [
+      "/media/landing/logos/color/slack.svg",
+      "",
+      null,
+    ],
+    [
+      "/media/landing/logos/color/openai.svg",
+      "",
+      null,
+    ],
+    [
+      "/media/landing/logos/color/openai.svg",
+      "",
+      null,
+    ],
+    [
+      "/media/case-studies/cityu.svg?v=185a2ee8",
+      "City University of Hong Kong",
+      null,
+    ],
+    [
+      "/media/case-studies/telecom.svg?v=3241cd3d",
+      "A leading US telecommunications infrastructure company",
+      null,
+    ],
+    [
+      "/media/case-studies/asset-management.svg?v=54485925",
+      "An asset management symbol",
+      null,
+    ],
+    [
+      null,
+      null,
+      "Platinum",
+    ],
+    [
+      "/media/case-studies/banking.svg?v=02ed3983",
+      "A banking mark",
+      null,
+    ],
+    [
+      "/media/case-studies/executive-search.svg?v=ea5988cb",
+      "An international executive search firm",
+      null,
+    ],
+    [
+      "/media/case-studies/wring.svg?v=2a1cb9ad",
+      "Wring",
+      null,
+    ],
+    [
+      "/media/case-studies/retail.svg?v=32ec4d76",
+      "A retail symbol",
+      null,
+    ],
+    [
+      null,
+      null,
+      "SOC 2 Type I Verified",
+    ],
+  ],
+}
+`;
+

@@ -1,0 +1,280 @@
+/**
+ * Public URL Share Endpoints — /v1/p/share
+ *
+ * Proxies to the sandbox's /kortix/share endpoints so the frontend can create,
+ * list, and revoke share links without talking to the sandbox directly.
+ *
+ * Provider-neutral: every session resolves through the session sandbox
+ * proxy table before this route talks to the sandbox daemon.
+ */
+
+import { createRoute, z } from '@hono/zod-openapi'
+import type { Context, TypedResponse } from 'hono'
+import type { ContentfulStatusCode } from 'hono/utils/http-status'
+import { resolveProvider } from '../provider'
+import { combinedAuth } from '../../middleware/auth'
+import { canAccessPreviewSandbox } from '../../shared/preview-ownership'
+import { makeOpenApiApp, json, errors, auth } from '../../openapi'
+import { shareUpstreamResult } from '../share-upstream'
+
+const shareApp = makeOpenApiApp()
+type ResolvedProvider = NonNullable<Awaited<ReturnType<typeof resolveProvider>>>
+
+/**
+ * The opaque passthrough (KRTX-4477 review): the daemon's share body or one of
+ * our error envelopes, at whatever numeric status the upstream produced — 201,
+ * 500, the 404 read that `shareUpstreamResult` rewrites to 501, or a status
+ * outside Hono's named list (Cloudflare 520 and friends); no status union can
+ * list them all, so the type stays the plain `Response` every `c.json` answer
+ * already is. Each route declares the `default` OpenAPI response with a
+ * wildcard content-type entry (every media type, any status, body passed
+ * through unchanged); in the checked handler union that makes the default
+ * member exactly this plain `Response` instead of a per-status claim. The two
+ * `ContentfulStatusCode` casts at the wire-number construction sites are
+ * Hono's own signature for a dynamic status — the same form hono's docs use
+ * for unofficial statuses.
+ */
+type ShareRouteResponse = Response
+
+// Share results are whatever the sandbox daemon's /kortix/share endpoint
+// returns (opaque), or our own { error } envelope — model permissively.
+const ShareResultSchema = z.record(z.string(), z.any()).openapi('ShareResult')
+
+function buildSandboxShareBaseUrl(resolved: ResolvedProvider): string | null {
+  if (resolved.baseUrl) {
+    return `${resolved.baseUrl}/kortix/share`
+  }
+  return null
+}
+
+function buildSandboxHeaders(resolved: ResolvedProvider): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (resolved.serviceKey) {
+    headers.Authorization = `Bearer ${resolved.serviceKey}`
+  }
+  return headers
+}
+
+async function parseJsonResponse(resp: Response): Promise<Record<string, unknown>> {
+  const text = await resp.text().catch(() => '')
+  if (!text) return {}
+  try {
+    return JSON.parse(text) as Record<string, unknown>
+  } catch {
+    return { error: text.slice(0, 500) }
+  }
+}
+
+async function resolveShareTarget(sandboxId: string): Promise<{
+  resolved: ResolvedProvider
+  sandboxShareBaseUrl: string
+} | {
+  error: string
+  status: number
+}> {
+  const resolved = await resolveProvider(sandboxId)
+  if (!resolved) {
+    return { error: 'Sandbox not found or not active', status: 404 }
+  }
+
+  const sandboxShareBaseUrl = buildSandboxShareBaseUrl(resolved)
+  if (!sandboxShareBaseUrl) {
+    return { error: 'Cannot reach sandbox', status: 502 }
+  }
+
+  return { resolved, sandboxShareBaseUrl }
+}
+
+async function ensureShareAccess(c: Context, sandboxId: string): Promise<
+  | null
+  | (Response & TypedResponse<{ error: string }, 403, 'json'>)
+> {
+  const userId = c.get('userId') as string | undefined
+  const accountId = c.get('accountId') as string | undefined
+
+  if (userId && await canAccessPreviewSandbox({ previewSandboxId: sandboxId, userId })) {
+    return null
+  }
+  if (accountId && await canAccessPreviewSandbox({ previewSandboxId: sandboxId, accountId })) {
+    return null
+  }
+  return c.json({ error: 'Not authorized to access this sandbox' }, 403)
+}
+
+// The one sandbox-proxy ceremony the three handlers share (KRTX-4477): the
+// access check, the daemon resolve, the 10 s fetch on the daemon's near-exact
+// URL, the `shareUpstreamResult` mapping and the 502 catch. Each handler keeps
+// its own validation and its own path; everything else lives here, so the
+// error envelopes and the status passthrough cannot drift apart again. The
+// daemon's status code passes through unchanged — `shareUpstreamResult` only
+// rewrites a 404 whose body names no share routes (that daemon is a 501).
+async function proxySandboxShare(
+  c: Context,
+  input: {
+    sandboxId: string
+    /** The URL path after the daemon share base, or '' for the base itself. */
+    path: string
+    method?: 'GET' | 'DELETE'
+    /** Names the failure in both the log line and the response envelope. */
+    action: string
+  },
+): Promise<ShareRouteResponse> {
+  const accessError = await ensureShareAccess(c, input.sandboxId)
+  if (accessError) return accessError
+
+  const target = await resolveShareTarget(input.sandboxId)
+  if ('error' in target) {
+    return c.json({ error: target.error }, target.status as ContentfulStatusCode)
+  }
+
+  const sandboxUrl = input.path
+    ? `${target.sandboxShareBaseUrl}/${input.path}`
+    : target.sandboxShareBaseUrl
+  try {
+    const resp = await fetch(sandboxUrl, {
+      method: input.method ?? 'GET',
+      headers: buildSandboxHeaders(target.resolved),
+      signal: AbortSignal.timeout(10_000),
+    })
+    const upstream = shareUpstreamResult(resp.status, await parseJsonResponse(resp))
+    return c.json(upstream.body, upstream.status as ContentfulStatusCode)
+  } catch (err) {
+    console.error(`[share] ${input.action} failed:`, err)
+    return c.json({ error: `Failed to ${input.action}` }, 502)
+  }
+}
+
+shareApp.openapi(
+  createRoute({
+    method: 'post',
+    path: '/',
+    tags: ['preview'],
+    summary: 'Create a public share link for a sandbox port',
+    ...auth,
+    middleware: [combinedAuth] as const,
+    request: {
+      body: {
+        content: {
+          'application/json': {
+            schema: z.object({
+              sandbox_id: z.string(),
+              port: z.number().int().min(1).max(65535),
+              ttl: z.string().optional(),
+              label: z.string().optional(),
+            }),
+          },
+        },
+      },
+    },
+    responses: {
+      200: json(ShareResultSchema, 'Share link (proxied from the sandbox daemon)'),
+      ...errors(400, 401, 403, 404, 501, 502),
+      default: {
+        description: 'Daemon passthrough: any other status the sandbox daemon answers, body passed through unchanged',
+        content: { '*/*': {} },
+      },
+    },
+  }),
+  // Validation kept per-handler (the OpenAPI schema answers for a malformed
+  // body first); this route passes the sandbox's opaque status code through
+  // unchanged and names the create action in its 502.
+  async (c: Context) => {
+    let body: { sandbox_id: string; port: number; ttl?: string; label?: string }
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'Invalid JSON body' }, 400)
+    }
+
+    const { sandbox_id, port, ttl, label } = body
+    if (!sandbox_id || typeof sandbox_id !== 'string') {
+      return c.json({ error: 'sandbox_id is required (string)' }, 400)
+    }
+    if (!port || typeof port !== 'number' || port < 1 || port > 65535) {
+      return c.json({ error: 'port is required (1-65535)' }, 400)
+    }
+
+    const queryParams = new URLSearchParams()
+    if (ttl) queryParams.set('ttl', ttl)
+    if (label) queryParams.set('label', label)
+    const qs = queryParams.toString() ? `?${queryParams.toString()}` : ''
+    return proxySandboxShare(c, { sandboxId: sandbox_id, path: `${port}${qs}`, action: 'create share link' })
+  },
+)
+
+shareApp.openapi(
+  createRoute({
+    method: 'get',
+    path: '/',
+    tags: ['preview'],
+    summary: 'List public share links for a sandbox',
+    ...auth,
+    middleware: [combinedAuth] as const,
+    request: {
+      query: z.object({ sandbox_id: z.string() }),
+    },
+    responses: {
+      200: json(ShareResultSchema, 'Share links (proxied from the sandbox daemon)'),
+      ...errors(400, 401, 403, 404, 501, 502),
+      default: {
+        description: 'Daemon passthrough: any other status the sandbox daemon answers, body passed through unchanged',
+        content: { '*/*': {} },
+      },
+    },
+  }),
+  // Manual query read kept — original returns a custom 400 envelope and proxies
+  // the sandbox's status code through.
+  async (c: Context) => {
+    const sandbox_id = c.req.query('sandbox_id')
+    if (!sandbox_id || typeof sandbox_id !== 'string') {
+      return c.json({ error: 'sandbox_id is required (string)' }, 400)
+    }
+
+    return proxySandboxShare(c, { sandboxId: sandbox_id, path: '', action: 'load share links' })
+  },
+)
+
+shareApp.openapi(
+  createRoute({
+    method: 'delete',
+    path: '/{token}',
+    tags: ['preview'],
+    summary: 'Revoke a public share link',
+    ...auth,
+    middleware: [combinedAuth] as const,
+    request: {
+      params: z.object({ token: z.string() }),
+      query: z.object({ sandbox_id: z.string() }),
+    },
+    responses: {
+      200: json(ShareResultSchema, 'Revocation result (proxied from the sandbox daemon)'),
+      ...errors(400, 401, 403, 404, 501, 502),
+      default: {
+        description: 'Daemon passthrough: any other status the sandbox daemon answers, body passed through unchanged',
+        content: { '*/*': {} },
+      },
+    },
+  }),
+  // Manual param/query read kept — original returns field-specific 400 envelopes
+  // and proxies the sandbox's status code through.
+  async (c: Context) => {
+    const sandbox_id = c.req.query('sandbox_id')
+    if (!sandbox_id || typeof sandbox_id !== 'string') {
+      return c.json({ error: 'sandbox_id is required (string)' }, 400)
+    }
+
+    const token = c.req.param('token')
+    if (!token) {
+      return c.json({ error: 'token is required' }, 400)
+    }
+
+    return proxySandboxShare(c, {
+      sandboxId: sandbox_id,
+      method: 'DELETE',
+      path: encodeURIComponent(token),
+      action: 'revoke share link',
+    })
+  },
+)
+
+export { shareApp }

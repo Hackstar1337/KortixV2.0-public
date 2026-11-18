@@ -1,0 +1,11 @@
+/.git
+**/node_modules
+**/.env
+**/.env.*
+**/.next
+**/__pycache__
+/.work
+/.runtime
+/selfhost/bin
+/selfhost/private
+*.log

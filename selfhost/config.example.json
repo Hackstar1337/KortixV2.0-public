@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "project_name": "kortix",
+  "mode": "production",
+  "callback_url": "https://api.example.com",
+  "frontend_url": "https://app.example.com",
+  "compose_file": "docker-compose.yml",
+  "providers": ["docker-cloud", "platinum"],
+  "docker_cloud_resources": {
+    "cpu_cores": 2,
+    "memory_gib": 4
+  },
+  "docker_cloud_credentials_file": "/srv/kortix/private/docker-cloud.env",
+  "tunnel_token_file": "/srv/kortix/private/cloudflared-token.txt",
+  "kortix_bin": "/srv/kortix/apps/cli/bundle/kortix",
+  "ports": {
+    "frontend": 13737,
+    "api": 13738,
+    "supabase": 13740,
+    "postgres": 13741,
+    "pooler": 13742
+  }
+}

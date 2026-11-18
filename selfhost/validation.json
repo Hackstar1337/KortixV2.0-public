@@ -1,0 +1,22 @@
+{
+  "status": "release-candidate",
+  "local_validation_date": "2026-11-18",
+  "full_source_images": {
+    "api": "built successfully from repository source",
+    "frontend": "built successfully from repository source",
+    "gateway": "built successfully from repository source"
+  },
+  "installer_and_bootstrap_tests": {"passed": 14, "failed": 0},
+  "docker_cloud_contract_tests": {"passed": 37, "failed": 0, "external_network_disabled": true},
+  "fresh_linux_instance_compose": {
+    "passed": true,
+    "active_services": 18,
+    "docker_credentials_api_only": true,
+    "stock_updater_disabled": true,
+    "containers_started": false,
+    "paid_cloud_resources_created": false
+  },
+  "source_integrity": "passed",
+  "fresh_production_end_to_end": "not verified; requires operator-owned stable HTTPS hostnames and environment-specific acceptance testing",
+  "existing_user_deployment_modified": false
+}

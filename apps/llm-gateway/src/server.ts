@@ -1,0 +1,243 @@
+import {
+  type AuthedPrincipal,
+  DEFAULT_BODY_AMPLIFICATION,
+  DEFAULT_MAX_REQUEST_BYTES,
+  InflightBudget,
+  createGateway,
+} from '@kortix/llm-gateway';
+import { wellKnownResponse } from '@kortix/shared/well-known';
+import { automaticInflightBudgetBytes } from './memory-budget';
+
+// One admission budget protects one standalone process. Work beyond capacity
+// receives a typed response before its body is retained.
+const inflightCapacityBytes =
+  Number(process.env.GATEWAY_INFLIGHT_BUDGET_BYTES) || automaticInflightBudgetBytes();
+// A per-request cap larger than the budget can ever admit is a lie: such a
+// request is refused 413 `too_large` ("never retry") when the honest answer is
+// that this process is too small for it. Clamp to what the budget can hold.
+export const perRequestCapBytes = Math.min(
+  Number(process.env.GATEWAY_MAX_REQUEST_BYTES) || DEFAULT_MAX_REQUEST_BYTES,
+  Math.floor(
+    inflightCapacityBytes /
+      (Number(process.env.GATEWAY_BODY_AMPLIFICATION) || DEFAULT_BODY_AMPLIFICATION),
+  ),
+);
+// How much resident memory one wire byte really costs while it is in flight.
+// This is the safety margin that decides how many big requests run at once, so
+// it is deliberately conservative and measured, not guessed: a single isolated
+// 27 MiB request peaks at ~2.3x (memory-envelope.test.ts), but under real
+// concurrency the transient copies of different requests overlap and GC lags
+// behind, so the honest number is higher. At 3x, 60 concurrent 27 MiB uploads
+// OOM-killed a 2 GiB container (measured 2026-08-24); the same load survives
+// at 6x with peak RSS well under the limit.
+const bodyAmplification =
+  Number(process.env.GATEWAY_BODY_AMPLIFICATION) || DEFAULT_BODY_AMPLIFICATION;
+const defaultInflight = new InflightBudget({
+  maxBytes: inflightCapacityBytes,
+  perRequestMaxBytes: perRequestCapBytes,
+  amplification: bodyAmplification,
+});
+import { Hono } from 'hono';
+import { createApiClient } from './clients/api-client';
+import { config } from './config';
+import { registerHealth } from './health';
+import { trackInflight } from './inflight';
+import { type TraceSink, createLangfuseSink } from './observability/langfuse';
+import { createGatewayLogger } from './observability/logger';
+import { registerRoutes } from './routes';
+import { createTokenRateLimit } from './token-rate-limit';
+import { createTraffic } from './traffic';
+
+/** The app type every registered route set takes: `clientIp` is the socket peer (main.ts). */
+export type GatewayApp = Hono<{ Bindings: { clientIp?: string | null } }>;
+
+export interface GatewayServer {
+  app: GatewayApp;
+  traces: TraceSink | null;
+  /** Requests still being served, including streams still relaying. */
+  inflightRequests: () => number;
+}
+
+// Cloudflare replaces an ORIGIN 502 or 504 with its own HTML "Bad gateway"
+// page (Enterprise-only "Origin Error Page Pass-thru" turns that off). Every
+// public gateway host sits behind a proxied Cloudflare hostname, so a JSON
+// `502 upstream_error` reached OpenCode as an HTML page and surfaced as
+// "AI_APICallError: Bad Gateway" with no code, no request id and no
+// suggestion (dev 2026-08-24; SampleCo 2026-08-22). 503 passes through
+// unchanged. The original status is kept on a header and in the body so
+// nothing is lost — only the transport-level rewrite is avoided.
+const CLOUDFLARE_REWRITTEN_STATUSES = new Set([502, 504]);
+export const UPSTREAM_STATUS_HEADER = 'x-kortix-upstream-status';
+
+export async function cloudflareSafe(res: Response): Promise<Response> {
+  if (!CLOUDFLARE_REWRITTEN_STATUSES.has(res.status)) return res;
+  const headers = new Headers(res.headers);
+  headers.set(UPSTREAM_STATUS_HEADER, String(res.status));
+  if (!headers.has('retry-after')) headers.set('retry-after', '5');
+  const contentType = headers.get('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    const text = await res.text();
+    try {
+      const body = JSON.parse(text) as Record<string, unknown>;
+      body.upstream_status = res.status;
+      return new Response(JSON.stringify(body), { status: 503, headers });
+    } catch {
+      return new Response(text, { status: 503, headers });
+    }
+  }
+  return new Response(res.body, { status: 503, headers });
+}
+
+// Anthropic SDKs, and Claude Code with ANTHROPIC_API_KEY, send the key as
+// `x-api-key`. The Anthropic-shaped route accepts it when no Authorization
+// header is present.
+export function messagesAuthorization(
+  authorization: string | undefined,
+  apiKey: string | undefined,
+): string | undefined {
+  if (authorization) return authorization;
+  const key = apiKey?.trim();
+  return key ? `Bearer ${key}` : undefined;
+}
+
+export function buildServer(
+  options: {
+    inflight?: InflightBudget;
+    requestsPerMinutePerCredential?: number;
+    requestsPerMinuteUnvalidated?: number;
+    trustEdgeClientIp?: boolean;
+  } = {},
+): GatewayServer {
+  const inflight = options.inflight ?? defaultInflight;
+  const api = createApiClient({
+    baseUrl: config.apiUrl,
+    internalBaseUrl: config.apiInternalUrl,
+    token: config.apiToken,
+    edgeKey: config.internalEdgeKey,
+  });
+
+  const logger = createGatewayLogger();
+
+  const traces =
+    config.langfuse.publicKey && config.langfuse.secretKey
+      ? createLangfuseSink({
+          publicKey: config.langfuse.publicKey,
+          secretKey: config.langfuse.secretKey,
+          baseUrl: config.langfuse.baseUrl,
+        })
+      : null;
+
+  if (!traces)
+    console.warn(
+      '[gateway] LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY unset — Langfuse disabled (request logs still persist via the API)',
+    );
+
+  const { recordOutcome, recordUpstream, trafficSnapshot, upstreamSignals } = createTraffic();
+  const rateLimit = createTokenRateLimit(
+    options.requestsPerMinutePerCredential ?? config.requestsPerMinutePerCredential,
+    options.requestsPerMinuteUnvalidated ?? config.requestsPerMinuteUnvalidated,
+    { trustEdgeClientIp: options.trustEdgeClientIp ?? config.trustEdgeClientIp },
+  );
+  // An API answer that carries a principal means the credential is real (even
+  // when a later gate denied the request: 402/403 carry the principal too). So
+  // every internal call that reaches the API to authenticate a token marks that
+  // token validated, whatever route the request took: without this a real
+  // credential would stay on the shared distinct-credential allowance for good
+  // (KRTX-4528). A request the shared bucket refuses never reaches the API, so
+  // its credential stays unvalidated until a later admitted request does; the
+  // refund of the shared slot happens there, in `validated()`, not here.
+  const validatedIfReal = (token: string, principal: AuthedPrincipal | null | undefined) => {
+    if (principal) rateLimit.validated(token);
+  };
+  const gateway = createGateway(
+    {
+      authenticate: async (token) => {
+        const principal = await api.authenticate(token);
+        validatedIfReal(token, principal);
+        return principal;
+      },
+      // Combined authentication + budget gate. Billing runs after model resolution.
+      authorize: async (token) => {
+        const result = await api.authorize(token);
+        validatedIfReal(token, result.principal);
+        return result;
+      },
+      admit: async (token, input) => {
+        const result = await api.admit(token, input);
+        validatedIfReal(token, result?.admission?.principal);
+        return result;
+      },
+      resolveRoute: api.resolveRoute,
+      resolveUpstream: api.resolveUpstream,
+      notePoolRateLimit: api.notePoolRateLimit,
+      notePoolUsage: api.notePoolUsage,
+      refreshCredential: api.refreshCredential,
+      claudeCredentials: api.claudeCredentials,
+      claudeRefused: api.claudeRefused,
+      assertBillingActive: api.assertBillingActive,
+      assertBudget: api.assertBudget,
+      recordUsage: api.recordUsage,
+      listModels: api.listModels,
+      recordTrace: async (trace) => {
+        recordUpstream(trace);
+        const sinks: Promise<unknown>[] = [api.recordTrace(trace)];
+        if (traces) sinks.push(traces.record(trace));
+        await Promise.allSettled(sinks);
+      },
+    },
+    { logger, imageWindow: config.imageWindow, claudeCodeUpstream: config.claudeCodeUpstream },
+  );
+  // `clientIp` is the socket peer (main.ts), which the public edge (a
+  // Cloudflare-locked ALB) makes an infrastructure value: the per-source share
+  // of the unvalidated allowance keys on it (token-rate-limit.ts).
+  const app: GatewayApp = new Hono();
+  app.use('*', async (c, next) => {
+    await next();
+    c.header('Cache-Control', 'private, no-store');
+    c.header('Content-Security-Policy', "default-src 'none';frame-ancestors 'none'");
+    c.header('X-Frame-Options', 'DENY');
+    // Permissions-Policy has no wildcard directive: deny each browser capability explicitly.
+    c.header(
+      'Permissions-Policy',
+      'accelerometer=(), ambient-light-sensor=(), attribution-reporting=(), autoplay=(), battery=(), bluetooth=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(), compute-pressure=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), keyboard-map=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), picture-in-picture=(), publickey-credentials-create=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), sync-xhr=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()',
+    );
+  });
+  for (const path of ['/.well-known/security.txt', '/robots.txt', '/sitemap.xml']) {
+    app.get(path, (c) => wellKnownResponse(c.req.path) ?? c.notFound());
+  }
+  const inflightRequests = trackInflight(app);
+  registerHealth(app, api, inflight, traces, trafficSnapshot, upstreamSignals, rateLimit);
+  registerRoutes(app, gateway, inflight, recordOutcome, rateLimit, async (request) => {
+    // A replayed Idempotency-Key answer is still a request: re-run the same
+    // credential + budget composition the pipeline's admission runs before a
+    // cached answer is served (KRTX-4612 review). Hits only; the first
+    // execution passes through the pipeline's own admission as before.
+    const token = request.authorization?.match(/^Bearer\s+(\S.*)$/i)?.[1]?.trim();
+    if (!token) return false;
+    const result = await api.authorize(token);
+    validatedIfReal(token, result.principal);
+    if (!result.ok || !result.principal) return false;
+    try {
+      await api.assertBudget(result.principal);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  // Register fallbacks after the handlers so supported methods keep their behavior.
+  const methodsByPath = new Map<string, Set<string>>();
+  for (const { path, method } of app.routes) {
+    if (method === 'ALL') continue;
+    const methods = methodsByPath.get(path) ?? new Set<string>();
+    methods.add(method);
+    if (method === 'GET') methods.add('HEAD');
+    methodsByPath.set(path, methods);
+  }
+  for (const [path, methods] of methodsByPath) {
+    app.all(path, (c) => {
+      c.header('Allow', [...methods].join(', '));
+      return c.json({ error: { message: 'Method not allowed' } }, 405);
+    });
+  }
+  return { app, traces, inflightRequests };
+}

@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kortix-ai/suna/blob/dev/apps/capture/schemas/device.schema.json",
+  "title": "device.json",
+  "description": "<prefix>/<device_id>/device.json, plaintext, written by the device on start, on change and at least hourly.",
+  "type": "object",
+  "required": [
+    "schema",
+    "device_id",
+    "machine_key_sha256",
+    "hostname",
+    "computer_name",
+    "os",
+    "os_version",
+    "arch",
+    "app_version",
+    "member",
+    "updated_at_ms"
+  ],
+  "properties": {
+    "schema": {
+      "const": 2
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/]+$"
+    },
+    "machine_key_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hostname": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "computer_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "os": {
+      "enum": [
+        "macos",
+        "windows",
+        "linux"
+      ]
+    },
+    "os_version": {
+      "type": "string"
+    },
+    "arch": {
+      "type": "string"
+    },
+    "app_version": {
+      "type": "string"
+    },
+    "member": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "email"
+          ],
+          "properties": {
+            "email": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "encryption": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "alg",
+            "key_id"
+          ]
+        }
+      ]
+    },
+    "first_chunk_ms": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "last_chunk_ms": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "updated_at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "displays": {
+      "type": "array",
+      "description": "Every connected display at the last capture, the focused one first.",
+      "items": {
+        "type": "object",
+        "description": "A connected display: id (CGDirectDisplayID on macOS, HMONITOR on Windows, RandR monitor index on Linux), name, bounds in points (global coordinates, top-left origin), backing scale, and whether it is the main display.",
+        "required": [
+          "id",
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "w": {
+            "type": "number"
+          },
+          "h": {
+            "type": "number"
+          },
+          "scale": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "main": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "machine": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "What the computer is made of, for support. Every field is optional and null when the OS does not give it cheaply. Refreshed at most hourly. Holds no names.",
+      "properties": {
+        "os_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The OS as it names itself: `Windows 11 Pro 24H2`, `macOS 26.0`, `Ubuntu 24.04.1 LTS`."
+        },
+        "os_build": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Windows `26200.9448` (build.UBR), macOS `25A354`, Linux the kernel release."
+        },
+        "cpu": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cpu_cores": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Logical cores."
+        },
+        "memory_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Installed memory."
+        },
+        "disk_free_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Free space on the volume of the local library."
+        },
+        "disk_total_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gpus": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Display adapters (Windows). Empty on macOS and Linux."
+        },
+        "booted_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "When the computer started, to the minute."
+        },
+        "timezone": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "IANA name (`Europe/Berlin`); Windows: its time zone key (`W. Europe Standard Time`)."
+        },
+        "utc_offset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`+01:00`."
+        },
+        "locale": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "BCP 47 tag of the person's locale: `de-DE`."
+        }
+      }
+    }
+  }
+}

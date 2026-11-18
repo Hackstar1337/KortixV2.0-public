@@ -1,0 +1,382 @@
+/**
+ * The approval inbox: connector actions a policy gated as `require_approval`,
+ * the per-session "needs input" summary, and the resolve endpoint.
+ */
+
+import { PROJECT_ACTIONS } from '../../iam';
+import { auth, errors, json, lenientBody } from '../../openapi';
+import { db } from '../../shared/db';
+import { inferAuditSource } from '../../shared/audit';
+import { createRoute, z } from '@hono/zod-openapi';
+import { connectorCalls, projectSessions, sessionPendingPermissions, sessionPendingQuestions } from '@kortix/db';
+import { and, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
+import { maySeeSessionApprovals } from '../lib/approval-authority';
+import { loadProjectForUser, lookupEmailsByUserIds, assertProjectCapability } from '../lib/access';
+import { isUuid } from '../../shared/validate';
+import { AnyObject, OkSchema, projectsApp } from '../lib/app';
+import {
+  normalizeString,
+  parseBoundedPositiveInt,
+} from '../lib/serializers';
+import { readJsonObject } from '../../shared/http-body';
+import {
+  normalizeApprovalNote,
+  resolveApprovalAs,
+} from '../lib/connector-approval-decision';
+import { markApprovalCardDecided } from '../../channels/approval-card-relay';
+import { approvalNotExpired } from '../../connectors/approval-expiry';
+import { callerKortixSessionId } from '../../middleware/caller-session';
+import { approvalCallerOf } from '../lib/http-approval-caller';
+import { listOpenColleagueAccessAsks } from '../lib/colleague-access';
+import { hiddenSpaceIds, sessionsInSpaces } from '../../shared/space-access';
+import { workspaceIdParam } from '../../shared/route-params';
+
+const APPROVAL_EXPIRED_BODY = { error: 'This approval expired', code: 'APPROVAL_EXPIRED' };
+
+const pendingApprovalWhere = (projectId: string) =>
+  and(
+    eq(connectorCalls.projectId, projectId),
+    eq(connectorCalls.status, 'pending_approval'),
+    isNull(connectorCalls.approvedBy),
+    isNull(connectorCalls.resolvedAt),
+    approvalNotExpired,
+  );
+
+const pendingAskWhere = (
+  projectId: string,
+  table: typeof sessionPendingQuestions | typeof sessionPendingPermissions,
+  resolvedColumn: typeof sessionPendingQuestions.answeredAt | typeof sessionPendingPermissions.decidedAt,
+) =>
+  and(
+    eq(table.projectId, projectId),
+    isNull(resolvedColumn),
+    or(isNull(table.expiresAt), gt(table.expiresAt, sql`NOW()`)),
+  );
+
+export function registerApprovalsRoutes(): void {
+  // GET /v1/projects/:projectId/approvals
+  // The approval inbox: connector actions a policy gated as `require_approval` that
+  // are still awaiting a human decision (status=pending_approval, unresolved).
+  // Manager-scoped — this is the project-wide oversight surface. A session's own
+  // launcher also sees + resolves the pending items for their session via the
+  // per-session audit view + the POST below.
+
+  projectsApp.openapi(
+    createRoute({
+      method: 'get',
+      path: '/{workspaceId}/approvals',
+      tags: ['access'],
+      summary: 'List approvals of a project',
+      ...auth,
+      request: {
+        params: z.object({ workspaceId: z.string() }),
+        query: z.object({ limit: z.string().optional() }),
+      },
+      responses: {
+        200: json(AnyObject, 'Pending approval inbox'),
+        ...errors(400, 404),
+      },
+    }),
+    async (c: any) => {
+      const projectId = workspaceIdParam(c);
+      const loaded = await loadProjectForUser(c, projectId, 'read');
+      if (!loaded) return c.json({ error: 'Not found' }, 404);
+      await assertProjectCapability(
+        c,
+        loaded.userId,
+        loaded.row.accountId,
+        projectId,
+        PROJECT_ACTIONS.PROJECT_MEMBERS_MANAGE,
+      );
+
+      const limit = parseBoundedPositiveInt(c.req.query('limit'), 100, 1, 500, 'limit');
+      if (!limit.ok) return c.json({ error: limit.error }, 400);
+
+      const rows = await db
+        .select({
+          executionId: connectorCalls.executionId,
+          actionPath: connectorCalls.actionPath,
+          risk: connectorCalls.risk,
+          sessionId: connectorCalls.sessionId,
+          actingUserId: connectorCalls.actingUserId,
+          resultSummary: connectorCalls.resultSummary,
+          createdAt: connectorCalls.createdAt,
+          expiresAt: connectorCalls.expiresAt,
+        })
+        .from(connectorCalls)
+        .where(pendingApprovalWhere(projectId))
+        .orderBy(desc(connectorCalls.createdAt))
+        .limit(limit.value);
+      // Calls of a private channel's threads the manager is not in are not listed.
+      const hiddenSessions = await sessionsInSpaces(
+        projectId,
+        rows.flatMap((r) => (r.sessionId ? [String(r.sessionId)] : [])),
+        await hiddenSpaceIds(projectId, loaded.userId, callerKortixSessionId(c)),
+      );
+      const listed = rows.filter((r) => !r.sessionId || !hiddenSessions.has(String(r.sessionId)));
+
+      const userIds = [...new Set(listed.map((r) => r.actingUserId).filter((v): v is string => !!v))];
+      const emailByUser = userIds.length
+        ? await lookupEmailsByUserIds(userIds)
+        : new Map<string, string>();
+
+      return c.json({
+        count: listed.length,
+        approvals: listed.map((r) => ({
+          execution_id: r.executionId,
+          action: r.actionPath,
+          risk: r.risk,
+          session_id: r.sessionId,
+          requested_by: r.actingUserId,
+          requested_by_email: r.actingUserId ? (emailByUser.get(r.actingUserId) ?? null) : null,
+          requested_at: r.createdAt.toISOString(),
+          expires_at: r.expiresAt?.toISOString() ?? null,
+          detail: r.resultSummary ?? null,
+        })),
+      });
+    },
+  );
+
+  // GET /v1/projects/:projectId/approvals/needs-input
+  // Lightweight per-session summary for the sidebar "needs input" indicator: which
+  // sessions have a connector call awaiting a human decision, and how many. A
+  // project MANAGER sees every session; everyone else sees only the sessions they
+  // LAUNCHED (mirrors who may resolve). Open agent questions count too, for the
+  // same principals.
+  // Read-gated + cheap enough to poll.
+
+  projectsApp.openapi(
+    createRoute({
+      method: 'get',
+      path: '/{workspaceId}/approvals/needs-input',
+      tags: ['access'],
+      summary: 'List approvals waiting for input',
+      ...auth,
+      request: { params: z.object({ workspaceId: z.string() }) },
+      responses: {
+        200: json(AnyObject, 'Sessions awaiting a human decision'),
+        ...errors(400, 404),
+      },
+    }),
+    async (c: any) => {
+      const projectId = workspaceIdParam(c);
+      const loaded = await loadProjectForUser(c, projectId, 'read');
+      if (!loaded) return c.json({ error: 'Not found' }, 404);
+
+      // Managers see every session's pending items; others only their own launched
+      // sessions (same principal set the resolve endpoint accepts).
+      let isManager = false;
+      try {
+        await assertProjectCapability(
+          c,
+          loaded.userId,
+          loaded.row.accountId,
+          projectId,
+          PROJECT_ACTIONS.PROJECT_MEMBERS_MANAGE,
+        );
+        isManager = true;
+      } catch {
+        isManager = false;
+      }
+
+      // Every unresolved pending action in the project, by session. (No DB join:
+      // connector_calls.session_id is `uuid` while project_sessions.session_id
+      // is `text` — cross-type equality errors in Postgres, so we resolve in JS
+      // where both surface as strings.)
+      const pendingRows = await db
+        .select({ sessionId: connectorCalls.sessionId })
+        .from(connectorCalls)
+        .where(pendingApprovalWhere(projectId));
+
+      // Open agent questions (`question` tool) and permission asks wait on a
+      // human too, and survive their sandbox (lib/session-asks.ts). Counted
+      // beside approvals; an expired ask waits on nobody.
+      const questionRows = await db
+        .select({ sessionId: sessionPendingQuestions.sessionId, surfaceSessionId: sessionPendingQuestions.surfaceSessionId })
+        .from(sessionPendingQuestions)
+        .where(pendingAskWhere(projectId, sessionPendingQuestions, sessionPendingQuestions.answeredAt));
+      const permissionRows = await db
+        .select({ sessionId: sessionPendingPermissions.sessionId, surfaceSessionId: sessionPendingPermissions.surfaceSessionId })
+        .from(sessionPendingPermissions)
+        .where(pendingAskWhere(projectId, sessionPendingPermissions, sessionPendingPermissions.decidedAt));
+      // The access My Kortix asks for a colleague (lib/colleague-access.ts) waits on a person the same way.
+      const colleagueAccessRows = await listOpenColleagueAccessAsks({ projectId, limit: 500 });
+
+      // Count per (Kortix) session id: the session that asked, and the
+      // session a person opens for it when that differs (a hidden worker's
+      // Router thread, a coordinator), so "Needs you" shows where they look.
+      const approvalsByKortix: Record<string, number> = {};
+      for (const r of pendingRows) {
+        const sid = r.sessionId ? String(r.sessionId) : null;
+        if (sid) approvalsByKortix[sid] = (approvalsByKortix[sid] ?? 0) + 1;
+      }
+      const questionsByKortix: Record<string, number> = {};
+      const surfacesOf: Record<string, Set<string>> = {};
+      for (const r of [...questionRows, ...permissionRows, ...colleagueAccessRows]) {
+        questionsByKortix[r.sessionId] = (questionsByKortix[r.sessionId] ?? 0) + 1;
+        if (r.surfaceSessionId && r.surfaceSessionId !== r.sessionId) {
+          (surfacesOf[r.sessionId] ??= new Set()).add(r.surfaceSessionId);
+        }
+      }
+      const kortixIds = [
+        ...new Set([...Object.keys(approvalsByKortix), ...Object.keys(questionsByKortix)]),
+      ];
+      if (kortixIds.length === 0) return c.json({ total: 0, sessions: {} });
+
+      // Look these sessions up to (a) gate non-managers to their own and (b) map to
+      // the runtime session id (`runtime_session_id`) the sidebar list keys on. The response carries BOTH
+      // id forms → the caller matches whichever it holds.
+      const sess = await db
+        .select({
+          sessionId: projectSessions.sessionId,
+          runtimeSessionId: projectSessions.runtimeSessionId,
+          createdBy: projectSessions.createdBy,
+          origin: projectSessions.origin,
+          spaceId: projectSessions.spaceId,
+        })
+        .from(projectSessions)
+        .where(
+          and(
+            eq(projectSessions.projectId, projectId),
+            inArray(projectSessions.sessionId, kortixIds),
+          ),
+        );
+
+      // A private channel the caller is not in counts nothing.
+      const hidden = await hiddenSpaceIds(projectId, loaded.userId, callerKortixSessionId(c));
+      const sessions: Record<string, number> = {};
+      let total = 0;
+      for (const s of sess) {
+        if (s.spaceId && hidden.has(s.spaceId)) continue;
+        // created_by is shared across every KaaB session, so it cannot filter
+        // one end-user's pending gates from another's — and an execution_id is
+        // all the resolve route needs.
+        const authority = {
+          isManager,
+          targetSessionId: s.sessionId,
+          targetSessionOrigin: s.origin ?? null,
+          targetSessionCreatedBy: s.createdBy,
+          callerUserId: loaded.userId,
+          callerSessionId: callerKortixSessionId(c),
+        };
+        const n = maySeeSessionApprovals(authority)
+          ? (approvalsByKortix[s.sessionId] ?? 0) + (questionsByKortix[s.sessionId] ?? 0)
+          : 0;
+        if (n <= 0) continue;
+        sessions[s.sessionId] = (sessions[s.sessionId] ?? 0) + n;
+        if (s.runtimeSessionId) sessions[s.runtimeSessionId] = sessions[s.sessionId]!;
+        for (const surface of surfacesOf[s.sessionId] ?? []) sessions[surface] = (sessions[surface] ?? 0) + n;
+        total += n;
+      }
+      return c.json({ total, sessions });
+    },
+  );
+
+  // POST /v1/projects/:projectId/approvals/:executionId
+  // Resolve a pending approval — { decision: 'approve' | 'deny', note?: string }. Allowed for a
+  // project MANAGER or the LAUNCHER of the session the action belongs to (the two
+  // principals a human-in-the-loop approval should recognise). Records who decided
+  // + when; idempotent-safe (a non-pending row 409s).
+
+  projectsApp.openapi(
+    createRoute({
+      method: 'post',
+      path: '/{workspaceId}/approvals/{executionId}',
+      tags: ['access'],
+      summary: 'Approve or deny a gated action',
+      ...auth,
+      request: {
+        params: z.object({ workspaceId: z.string(), executionId: z.string() }),
+        body: { content: { 'application/json': { schema: lenientBody({
+            decision: z.enum(['approve', 'deny']).openapi({ description: 'Approve or deny exactly this gated call.' }),
+            note: z.string().optional().openapi({ description: 'Note the agent receives with the decision.' }),
+          }) } } },
+      },
+      responses: {
+        200: json(OkSchema, 'Resolved'),
+        ...errors(400, 403, 404, 409),
+      },
+    }),
+    async (c: any) => {
+      const projectId = workspaceIdParam(c);
+      const executionId = c.req.param('executionId');
+      if (!isUuid(executionId)) return c.json({ error: 'Invalid execution id' }, 400);
+      const body = await readJsonObject(c);
+      const decision = normalizeString(body.decision);
+      if (decision !== 'approve' && decision !== 'deny') {
+        return c.json({ error: "decision must be 'approve' or 'deny'" }, 400);
+      }
+      // Optional message from the human to the agent ("deny — reword the second
+      // paragraph"). Rides into the resume prompt so a deny can steer, not just stop.
+      const note = normalizeApprovalNote(body.note);
+      // NO SCOPES. A decision applies to exactly the call that asked for it.
+      //
+      // This used to accept 'session' ("stop asking for this tool") and
+      // 'session_all' ("stop asking for anything"), surfaced as one-click buttons.
+      // Both defeated the gate they were attached to: the reflex click that clears
+      // today's prompt also silently pre-authorises every later call, including
+      // ones with completely different arguments — a mail send to a different
+      // recipient never asks again. An approval that can be waived in one click is
+      // not a control. A legitimately unattended tool belongs in an explicit
+      // `always_run` policy rule, authored deliberately in the Policies panel,
+      // where the full rule set is visible.
+      //
+      // A stale client may still POST `scope` — it is ignored, not honoured.
+
+      const loaded = await loadProjectForUser(c, projectId, 'read');
+      if (!loaded) return c.json({ error: 'Not found' }, 404);
+
+      // Who may resolve: a project MANAGER, OR the human who launched the
+      // session the gated action belongs to. (Founder decision: managers +
+      // launcher.) The session audit and the Review Center report this same
+      // verdict as `can_resolve`, from the same `approvalCallerOf`.
+      const result = await resolveApprovalAs({
+        projectId,
+        accountId: loaded.row.accountId,
+        executionId,
+        decision,
+        note,
+        caller: await approvalCallerOf(c, loaded, projectId),
+        auditSource: inferAuditSource(c.get('authType'), 'human'),
+        updateStaleCard: (row) =>
+          markApprovalCardDecided({ projectId, row, decision, note, actorUserId: loaded.userId }),
+      });
+      if (result.outcome === 'not_found') return c.json({ error: 'Not found' }, 404);
+      if (result.outcome === 'forbidden') {
+        return c.json(
+          result.reason === 'session_bound_caller'
+            ? {
+                error: "This approval waits for a person: the session's launcher or a project manager approves or denies it.",
+                code: 'APPROVAL_REQUIRES_HUMAN',
+              }
+            : result.reason === 'non_human_caller'
+              ? {
+                  error: 'Sign in with a Kortix account to resolve this approval',
+                  code: 'APPROVAL_REQUIRES_HUMAN',
+                }
+              : { error: 'Only a workspace manager or the session launcher can resolve this' },
+          403,
+        );
+      }
+      if (result.outcome === 'preview_unavailable') {
+        return c.json(
+          {
+            error: 'This call recorded no parameters to review, so it cannot be approved',
+            code: 'APPROVAL_PREVIEW_UNAVAILABLE',
+          },
+          409,
+        );
+      }
+      if (result.outcome === 'expired') return c.json(APPROVAL_EXPIRED_BODY, 409);
+      if (result.outcome === 'already_resolved') {
+        return c.json({ error: 'Approval already resolved' }, 409);
+      }
+
+      return c.json({ ok: true });
+    },
+  );
+}
+
+// PUT /v1/projects/:projectId/sessions/:sessionId/sharing
+// Owner or project manager sets who can see/open this session
+// (private | project | members). Mirrors connector/secret sharing.

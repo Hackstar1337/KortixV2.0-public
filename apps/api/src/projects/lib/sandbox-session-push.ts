@@ -1,0 +1,416 @@
+import { eq } from 'drizzle-orm';
+import { projectSessions, sessionSandboxes } from '@kortix/db';
+import {
+  COMPILED_AGENT_CONFIG_ENV,
+  COMPILED_AGENT_CONFIG_GZ_CAPABILITY,
+  fitsInEnvString,
+} from '@kortix/api-contract/compiled-agent-config-env';
+import { db } from '../../shared/db';
+import { resolveSandboxIngress } from '../../sandbox-proxy/backend';
+import { errorMessage } from '../../shared/error-message';
+// Aliased: every push below binds a local `config` from the sandbox row, which
+// would shadow the app config import inside those function bodies.
+import { config as appConfig } from '../../config';
+import { resolveLlmGatewayBaseUrl } from '../../llm-gateway/sandbox-base-url';
+import {
+  agentConfigEtag,
+  resolveCompiledAgentConfigForSession,
+  resolveSelectedAgentConfigForSession,
+} from './compile-agent-config';
+import { repositoryAccessFromSessionMetadata } from './session-sandbox-metadata';
+import { hasConfigReleaseCapability } from './session-config-release';
+import { resolveSandboxEnvSnapshot } from './sandbox-env-snapshot';
+import { SANDBOX_SERVICE_PORT, postEnvToDaemon } from './sandbox-env-transport';
+
+/**
+ * A push target that exists but is not `active` is a control-plane DIVERGENCE,
+ * not an ordinary miss, and it must say so.
+ *
+ * Every push below used to filter the lookup on `status = 'active'` and return a
+ * bare `'no active sandbox'`, which no caller logged. A session whose row said
+ * `stopped` while its VM was genuinely running — serving prompts the whole time
+ * — therefore received no secret, model or scope push for HOURS, and the only
+ * visible symptom was an agent that could not see a secret the UI insisted it
+ * had (a prod session, 2026-08-27). `backend.ts` deliberately refuses to
+ * heal a row whose deadline has expired, so nothing else reconciles this and
+ * nothing else reports it.
+ *
+ * `sessionSandboxes.status` is NOT NULL, so callers guard on a truthy value
+ * only to stay compatible with test doubles that select a narrower row shape.
+ */
+function nonActiveSandboxSkip(
+  what: string,
+  input: { sessionId: string; projectId?: string },
+  status: string,
+): { applied: false; reason: string } {
+  console.warn(`[env-sync] skipping ${what} — sandbox row is not active`, {
+    sessionId: input.sessionId,
+    projectId: input.projectId,
+    sandboxStatus: status,
+  });
+  return { applied: false, reason: `sandbox row is '${status}', not active` };
+}
+
+/**
+ * Is a config release ACTUALLY governing this box? `true`, `false`, or `null`
+ * when health did not answer.
+ *
+ * Such a box receives compiled governance inside its config release. A separate
+ * `KORTIX_COMPILED_AGENT_CONFIG` push through `/kortix/env` would reconfigure
+ * the runtime on governance that does not match the release it runs — and the
+ * box drops it anyway (pi's `applyRuntimeEnv` ignores it while the release owns
+ * governance).
+ *
+ * This reads the box's STATE (`config.release_id`), not the binary's
+ * `config.release.v1` capability. The capability is compiled in and is present
+ * on every current daemon, so gating on it withheld the push from every box
+ * that runs NO release — one that reverted to its workspace config, or a
+ * release chain that stepped down to the image default. Those boxes are
+ * exactly the pre-release case the push exists for. pi's `governanceOwned()`
+ * is the same `release_id !== null` check on the daemon's own side.
+ */
+export async function daemonHasConfigReleases(
+  baseUrl: string,
+  headers: Record<string, string>,
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response> = (url, init) => fetch(url, init),
+): Promise<boolean | null> {
+  try {
+    const res = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/kortix/health`, {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { capabilities?: unknown; config?: unknown };
+    // An old daemon has neither the capability nor a `config` block.
+    if (!hasConfigReleaseCapability(body.capabilities)) return false;
+    const config = (body.config ?? null) as { release_id?: unknown } | null;
+    return typeof config?.release_id === 'string' && config.release_id.length > 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does the daemon list `capability` in `/kortix/health`? `true`, `false`, or
+ * `null` when health did not answer.
+ */
+async function daemonListsCapability(
+  baseUrl: string,
+  headers: Record<string, string>,
+  capability: string,
+): Promise<boolean | null> {
+  try {
+    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/kortix/health`, {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { capabilities?: unknown };
+    return Array.isArray(body.capabilities) && body.capabilities.includes(capability);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Recompile this session's agent config from git and deliver it to the running box.
+ *
+ * The compiled agent config — agents, their prompts, permissions, model — is the
+ * one part of a session's configuration with no runtime source. It is compiled
+ * once at provision and handed down as `KORTIX_COMPILED_AGENT_CONFIG`, so a
+ * session merged past days ago keeps running the agents it booted with. Pulling
+ * the branch inside the sandbox does not help (the compiled bytes never came
+ * from the working tree) and neither did restarting the runtime (the daemon's
+ * env was unchanged, so a respawn rebuilt the same config).
+ *
+ * Recompiles from `baseRef` — the ref the SESSION runs on, which is not always
+ * the project default.
+ *
+ * pi applies it in place: a running turn keeps its config and the next turn
+ * runs the new one. An old OpenCode box restarts its runtime for it, which ends
+ * a running turn; a caller doing this mid-session must say so.
+ */
+export async function pushSessionAgentConfigToSandbox(input: {
+  projectId: string;
+  sessionId: string;
+  repoUrl: string;
+  defaultBranch: string;
+  manifestPath?: string | null;
+  baseRef?: string | null;
+  /** Reports real operation boundaries to callers that expose progress. */
+  onPhase?: (phase: 'compiling-config' | 'applying-config') => void;
+}): Promise<{
+  applied: boolean;
+  reason?: string;
+  runtimeReload?: 'disposed' | 'restarted' | 'kept-old' | null;
+  runtimeTurnEnded?: boolean | null;
+}> {
+  try {
+    input.onPhase?.('compiling-config');
+    const [session] = await db
+      .select({
+        agentName: projectSessions.agentName,
+        metadata: projectSessions.metadata,
+      })
+      .from(projectSessions)
+      .where(eq(projectSessions.sessionId, input.sessionId))
+      .limit(1);
+    const gitProject = {
+      projectId: input.projectId,
+      repoUrl: input.repoUrl,
+      defaultBranch: input.defaultBranch,
+      manifestPath: input.manifestPath ?? 'kortix.yaml',
+      gitAuthToken: null,
+    };
+    const compiled =
+      !repositoryAccessFromSessionMetadata(session?.metadata) &&
+      session?.agentName
+        ? await resolveSelectedAgentConfigForSession(
+            gitProject,
+            session.agentName,
+            input.baseRef,
+          )
+        : await resolveCompiledAgentConfigForSession(gitProject, input.baseRef);
+    // `null` is a project with no manifest file. Pushing an empty value would
+    // DELETE the agent config the box is running. Leave the box as it is.
+    if (!compiled) return { applied: false, reason: 'no compiled agent config' };
+
+    // Selected WITHOUT the status filter so a non-active row can be NAMED. The
+    // filtered form returned a bare 'no active sandbox' and the caller logged
+    // nothing, so a session whose row said `stopped` while its VM was genuinely
+    // running — serving prompts the whole time — silently received no secret or
+    // config push for HOURS. A prod session, 2026-08-27: every push
+    // since the secret was created was skipped this way, and the only visible
+    // symptom was an agent that could not see a secret the UI said it had.
+    const [row] = await db
+      .select({
+        externalId: sessionSandboxes.externalId,
+        config: sessionSandboxes.config,
+        status: sessionSandboxes.status,
+      })
+      .from(sessionSandboxes)
+      .where(eq(sessionSandboxes.sessionId, input.sessionId))
+      .limit(1);
+    if (!row?.externalId) return { applied: false, reason: 'no sandbox for session' };
+    if (row.status && row.status !== 'active')
+      return nonActiveSandboxSkip('agent-config push', input, row.status);
+
+    const config = (row.config || {}) as Record<string, unknown>;
+    const serviceKey = typeof config.serviceKey === 'string' ? config.serviceKey : null;
+    if (!serviceKey) return { applied: false, reason: 'sandbox has no service key' };
+
+    const snapshot = await resolveSandboxEnvSnapshot(input.projectId, input.sessionId);
+    if (!snapshot) return { applied: false, reason: 'no env snapshot' };
+
+    const { url, headers } = await resolveSandboxIngress(row.externalId, {
+      port: SANDBOX_SERVICE_PORT,
+      transport: 'http',
+    });
+    // Capability gate. A daemon with config releases gets governance from its
+    // release; `null` (health did not answer) is not permission to push.
+    const daemonHeaders = {
+      ...(headers as Record<string, string>),
+      Authorization: `Bearer ${serviceKey}`,
+    };
+    const releases = await daemonHasConfigReleases(url, daemonHeaders);
+    if (releases !== false) {
+      return {
+        applied: false,
+        reason:
+          releases === true
+            ? 'the daemon receives compiled governance in its config release'
+            : 'could not read the daemon capabilities',
+      };
+    }
+    // The push itself is an HTTP body, with no exec limit. The daemon then
+    // keeps the value in the env that the runtime, git and every PTY inherit. A
+    // daemon that predates the gzip form would store an oversized config raw,
+    // and every exec on the box after that would fail with E2BIG. Such a box
+    // keeps the config it booted with.
+    if (
+      !fitsInEnvString(COMPILED_AGENT_CONFIG_ENV, compiled) &&
+      (await daemonListsCapability(url, daemonHeaders, COMPILED_AGENT_CONFIG_GZ_CAPABILITY)) !== true
+    ) {
+      return {
+        applied: false,
+        reason: 'the compiled agent config exceeds one env string and the daemon cannot hold it encoded',
+      };
+    }
+    // The daemon call blocks until its verified reload either promotes the new
+    // runtime or keeps the old one. This phase therefore names the whole
+    // apply-and-validate boundary instead of inventing sub-phases we cannot see.
+    input.onPhase?.('applying-config');
+    const pushed = await postEnvToDaemon({
+      previewUrl: url,
+      providerHeaders: headers,
+      serviceKey,
+      snapshot,
+      runtimeEnv: {
+        KORTIX_COMPILED_AGENT_CONFIG: compiled,
+        // Pushed with the config so the box's reported etag never lags what it
+        // is actually running.
+        KORTIX_COMPILED_AGENT_CONFIG_ETAG: agentConfigEtag(compiled) ?? '',
+      },
+      // Makes the runtime apply the new agents: pi in place, an old OpenCode
+      // box by a restart.
+      refreshModels: true,
+    });
+    // `applied` means WE pushed it. Whether the runtime actually took it is
+    // `runtimeReload` — a declined swap leaves the old config running, and
+    // reporting a bare `applied: true` for that is the lie this field prevents.
+    return {
+      applied: true,
+      runtimeReload: pushed.runtimeReload,
+      runtimeTurnEnded: pushed.runtimeTurnEnded,
+    };
+  } catch (err) {
+    const reason = errorMessage(err);
+    console.warn(`[env-sync] agent-config push failed for session ${input.sessionId}:`, reason);
+    return { applied: false, reason };
+  }
+}
+
+/**
+ * Re-point ONE live session at a different model.
+ *
+ * The runtime reads `KORTIX_MODEL` from its env, so the value must reach the
+ * daemon AND the runtime must apply it. `refreshModels: true` is what triggers
+ * that: pi reconfigures in place for the next turn, an old OpenCode box
+ * restarts its runtime.
+ *
+ * Best-effort by design: the row is already updated by the caller, so a sandbox
+ * that is down or unreachable simply picks the new model up on its next boot.
+ * Returns whether a live box actually took it, so the caller can tell the user
+ * whether the change is in effect NOW or only from the next turn.
+ */
+export async function pushSessionModelToSandbox(input: {
+  projectId: string;
+  sessionId: string;
+  model: string;
+}): Promise<{ applied: boolean; reason?: string }> {
+  try {
+    const [row] = await db
+      .select({
+        externalId: sessionSandboxes.externalId,
+        config: sessionSandboxes.config,
+        status: sessionSandboxes.status,
+      })
+      .from(sessionSandboxes)
+      .where(eq(sessionSandboxes.sessionId, input.sessionId))
+      .limit(1);
+    if (!row?.externalId) return { applied: false, reason: 'no active sandbox' };
+    if (row.status && row.status !== 'active')
+      return nonActiveSandboxSkip('model push', input, row.status);
+
+    const config = (row.config || {}) as Record<string, unknown>;
+    const serviceKey = typeof config.serviceKey === 'string' ? config.serviceKey : null;
+    if (!serviceKey) return { applied: false, reason: 'sandbox has no service key' };
+
+    const snapshot = await resolveSandboxEnvSnapshot(input.projectId, input.sessionId);
+    if (!snapshot) return { applied: false, reason: 'no env snapshot' };
+
+    const { url, headers } = await resolveSandboxIngress(row.externalId, {
+      port: SANDBOX_SERVICE_PORT,
+      transport: 'http',
+    });
+    await postEnvToDaemon({
+      previewUrl: url,
+      providerHeaders: headers,
+      serviceKey,
+      snapshot,
+      runtimeEnv: { KORTIX_MODEL: input.model },
+      // Makes the runtime apply the new model (pi: in place, next turn).
+      refreshModels: true,
+    });
+    return { applied: true };
+  } catch (err) {
+    const reason = errorMessage(err);
+    console.warn(`[env-sync] model push failed for session ${input.sessionId}:`, reason);
+    return { applied: false, reason };
+  }
+}
+
+/**
+ * Re-resolve this session's secrets snapshot and deliver it to the RUNNING
+ * sandbox, and make the runtime apply the new set.
+ *
+ * `PUT /sessions/{id}/scope` re-scopes a live session's secrets allowlist. The
+ * row was persisted, but for a long time nothing pushed the new snapshot to the
+ * box: the route returned "Applies from the next prompt." and delegated the
+ * actual delivery to `syncSandboxEnvForPrompt`. That delegation was unreliable:
+ *
+ *   - the per-prompt hot sync has two silent early-returns (`!serviceKey`,
+ *     `!snapshot`/`!row.createdBy`) that skip the POST with no log;
+ *   - it only fires when the prompt routes through `POST :8000
+ *     /session/{id}/{prompt_async|message}` — a prompt sent any other way
+ *     (straight to :4096, the lifecycle queue) slips past it;
+ *   - even when it DID fire, the OpenCode daemon's env route took the ~51ms
+ *     dispose fast path for a pure secret change, and a dispose re-read the
+ *     OpenCode CONFIG file only, so the OpenCode process env stayed on the OLD
+ *     (0/47) snapshot while `agent-env.sh` got the new one (so freshly-started
+ *     shells saw 47/47).
+ *
+ * Pushing here — the same pattern the `/model` PUT already uses — fixes both
+ * halves: the snapshot is re-derived from the freshly-committed allowlist and
+ * POSTed to the daemon. The daemon reconciles its own process env and the
+ * agent env file from it (`reconcileProjectEnv`), and `refreshModels: true`
+ * makes pi reconfigure in place for the next turn. The LLM-gateway env is
+ * re-stamped alongside, and revocation keeps working (`knownNames` is still
+ * tracked in the daemon store, so a dropped secret is actively cleared).
+ *
+ * Best-effort by design, mirroring `pushSessionModelToSandbox`: the row is
+ * already committed, so a sandbox that is down or unreachable simply picks the
+ * new scope up on its next boot. The caller reports `applied_live` so a UI can
+ * tell "in effect now" from "stored, applies at next boot" — the same
+ * distinction the model route makes.
+ */
+export async function pushSessionScopeToSandbox(input: {
+  projectId: string;
+  sessionId: string;
+}): Promise<{ applied: boolean; reason?: string }> {
+  try {
+    const [row] = await db
+      .select({
+        externalId: sessionSandboxes.externalId,
+        config: sessionSandboxes.config,
+        status: sessionSandboxes.status,
+      })
+      .from(sessionSandboxes)
+      .where(eq(sessionSandboxes.sessionId, input.sessionId))
+      .limit(1);
+    if (!row?.externalId) return { applied: false, reason: 'no active sandbox' };
+    if (row.status && row.status !== 'active')
+      return nonActiveSandboxSkip('scope push', input, row.status);
+
+    const config = (row.config || {}) as Record<string, unknown>;
+    const serviceKey = typeof config.serviceKey === 'string' ? config.serviceKey : null;
+    if (!serviceKey) return { applied: false, reason: 'sandbox has no service key' };
+
+    // Re-derive from the row the route JUST committed — `resolveOwnerRawEnv`
+    // reads `secretsAllowlist` fresh, so this reflects the new scope, not the
+    // boot snapshot the daemon is still running.
+    const snapshot = await resolveSandboxEnvSnapshot(input.projectId, input.sessionId);
+    if (!snapshot) return { applied: false, reason: 'no env snapshot' };
+
+    const { url, headers } = await resolveSandboxIngress(row.externalId, {
+      port: SANDBOX_SERVICE_PORT,
+      transport: 'http',
+    });
+    await postEnvToDaemon({
+      previewUrl: url,
+      providerHeaders: headers,
+      serviceKey,
+      snapshot,
+      // Makes the runtime apply the new set: pi reconfigures in place. An old
+      // OpenCode box respawns its child, because project secrets shape that
+      // child's env only at spawn.
+      refreshModels: true,
+      llmGatewayBaseUrl: resolveLlmGatewayBaseUrl(appConfig.KORTIX_URL),
+    });
+    return { applied: true };
+  } catch (err) {
+    const reason = errorMessage(err);
+    console.warn(`[env-sync] scope push failed for session ${input.sessionId}:`, reason);
+    return { applied: false, reason };
+  }
+}

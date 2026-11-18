@@ -1,0 +1,25 @@
+name: Build source images
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Source image to compile; this does not deploy
+        required: true
+        default: api
+        type: choice
+        options: [api, frontend, gateway, all]
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Source image build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compile selected source image
+        env:
+          BUILD_TARGET: ${{ inputs.target }}
+        run: bash selfhost/build.sh "$BUILD_TARGET"

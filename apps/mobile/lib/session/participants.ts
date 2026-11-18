@@ -1,0 +1,121 @@
+/**
+ * Pure logic behind the shared-session UI: the sender under a user message
+ * (`components/session/turn/user-message.tsx`) and the header avatar stack
+ * (`components/session/SessionParticipantStack.tsx`). Same rules as web's
+ * `features/session/participants/session-participants.tsx`.
+ */
+import type { SessionMessageAuthors, SessionParticipant, SessionParticipants } from '@kortix/sdk';
+
+/** What an avatar needs: a participant, or a message's member author. */
+export type AvatarPerson = Pick<SessionParticipant, 'name' | 'email'> & { avatar_url?: string | null };
+
+/** The display name, else the email local part. The viewer too. */
+export function participantName(person: AvatarPerson): string {
+  return person.name?.trim() || person.email?.split('@')[0] || '';
+}
+
+/** What an avatar's initial and colour derive from: the name, else the email. */
+export function participantAvatarText(person: AvatarPerson): string | undefined {
+  return person.name?.trim() || person.email || undefined;
+}
+
+/**
+ * Up to two letters, web `UserAvatar`'s rule: the first and last word of the
+ * name, else the email local part split on `.`, `_` and `-`.
+ */
+export function participantInitials(person: AvatarPerson): string {
+  const words = person.name?.trim().split(/\s+/).filter(Boolean) ?? [];
+  if (words.length > 0) {
+    const last = words.length > 1 ? words[words.length - 1][0] : '';
+    return (words[0][0] + last).toUpperCase();
+  }
+  const local = person.email?.split('@')[0] ?? '';
+  const segments = local.split(/[._-]+/).filter(Boolean);
+  return ((segments[0]?.[0] ?? '') + (segments[1]?.[0] ?? '')).toUpperCase() || '?';
+}
+
+export interface ParticipantStack {
+  shown: SessionParticipant[];
+  /** People who can open the session beyond the faces shown. */
+  more: number;
+  label: string;
+}
+
+/** The header stack, or null unless two or more people can open the session. */
+export function participantStack(
+  participants: SessionParticipants | undefined,
+  limit: number,
+): ParticipantStack | null {
+  if (!participants?.multi_user || participants.total < 2) return null;
+  const shown = participants.participants.slice(0, limit);
+  const more = participants.total - shown.length;
+  const names = shown.map(participantName).filter(Boolean).join(', ');
+  return {
+    shown,
+    more,
+    label: `People in this session: ${names}${more > 0 ? ` and ${more} more` : ''}`,
+  };
+}
+
+/**
+ * The person whose avatar sits above a message, or null. Every member message
+ * draws its author, the viewer included, in every session (web
+ * `MessageSenderAbove`): nothing moves when a second person joins. Another
+ * session's agent has no face: null.
+ */
+export function messageAvatarPerson(
+  authors: SessionMessageAuthors | undefined,
+  messageId: string,
+): AvatarPerson | null {
+  const author = authors?.authors[messageId];
+  if (author?.kind !== 'member') return null;
+  return { name: author.name, email: author.email, avatar_url: author.avatar_url ?? null };
+}
+
+/**
+ * The Kortix session that sent a message, or null (web `resolveTranscriptAuthors`
+ * + `MessageAuthorLabel`). A spawned session's first message has no prompt
+ * record of its own, so `initial_author` goes to the first user message that
+ * has no author. Always drawn: a session sender is never the viewer.
+ */
+export function messageSessionAuthor(
+  authors: SessionMessageAuthors | undefined,
+  userMessageIds: readonly string[],
+  messageId: string,
+): { session_id: string; name: string; agent?: string } | null {
+  let author = authors?.authors[messageId];
+  if (!author && authors?.initial_author && userMessageIds.find((id) => !authors.authors[id]) === messageId) {
+    author = authors.initial_author;
+  }
+  if (author?.kind !== 'session') return null;
+  return { session_id: author.session_id, name: author.name, agent: author.agent };
+}
+
+export interface ParticipantSheetRow {
+  key: string;
+  person: SessionParticipant;
+  /** The display name, else the email local part. */
+  name: string;
+  email: string | null;
+  isViewer: boolean;
+}
+
+/**
+ * The people sheet's rows (web's hover card): one per listed person, owner
+ * first. `more` counts who can open the session beyond the listed ones (the
+ * route lists 20; `total` is everyone).
+ */
+export function participantSheetRows(participants: SessionParticipants | undefined): {
+  rows: ParticipantSheetRow[];
+  more: number;
+} {
+  if (!participants) return { rows: [], more: 0 };
+  const rows = participants.participants.map((person) => ({
+    key: person.user_id,
+    person,
+    name: participantName(person),
+    email: person.email,
+    isViewer: person.is_viewer,
+  }));
+  return { rows, more: Math.max(0, participants.total - rows.length) };
+}
